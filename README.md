@@ -17,6 +17,17 @@ The build script writes Linux, macOS, and Windows binaries for amd64 and arm64,
 plus `SHA256SUMS`, to `dist/`. Version and commit metadata are embedded at build
 time.
 
+The **Build executables** GitHub Actions workflow builds all six targets on
+branch pushes and pull requests, independently of the native test jobs. Open
+the workflow run and download **masterdns-agent-binaries** from **Artifacts**.
+Unzip the download, then extract `masterdns-agent-binaries.tar.gz`; the archive
+preserves executable permissions and includes the existing `SHA256SUMS` file.
+Artifacts are retained for 14 days. These development builds report `dev` and
+the source commit through `version`; tagged releases use the release workflow.
+
+The workflow also supports **Run workflow** once `build.yml` is present on the
+repository's default branch, with the branch selectable when starting a run.
+
 ## Configuration
 
 Run the agent with an explicit JSON configuration file:

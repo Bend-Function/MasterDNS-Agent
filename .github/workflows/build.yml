@@ -1,0 +1,39 @@
+name: Build executables
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-executables-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build all six executables
+        env:
+          VERSION: dev
+          COMMIT: ${{ github.sha }}
+        run: sh scripts/build.sh
+      - name: Package executables with file permissions
+        run: tar -czf "$RUNNER_TEMP/masterdns-agent-binaries.tar.gz" -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: masterdns-agent-binaries
+          path: ${{ runner.temp }}/masterdns-agent-binaries.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
