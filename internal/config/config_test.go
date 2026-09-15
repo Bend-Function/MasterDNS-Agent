@@ -104,6 +104,11 @@ func TestLoadForEnrollmentDoesNotRequireIssuedIdentity(t *testing.T) {
 
 func writeConfig(t *testing.T, dir, body string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// Test fixtures interpolate native paths into JSON. Escape the path
+		// separators before writing so the fixture remains valid JSON.
+		body = strings.ReplaceAll(body, `\`, `\\`)
+	}
 	path := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "-")+".json")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)

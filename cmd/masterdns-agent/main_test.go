@@ -123,7 +123,7 @@ func TestEnrollExchangesStdinTokenAndPersistsIdentity(t *testing.T) {
 	tokenPath := filepath.Join(dir, "runtime-token")
 	configPath := filepath.Join(dir, "agent.json")
 	body := `{"serverUrl":"` + server.URL + `","caFile":"` + caPath + `","probeId":"","tokenFile":"` + tokenPath + `","stateDir":"` + filepath.Join(dir, "state") + `","maxConcurrency":1,"allowIpv4":true,"allowIpv6":false,"allowedPrivateCidrs":[]}`
-	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(configPath, configFixtureJSON(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
@@ -137,6 +137,13 @@ func TestEnrollExchangesStdinTokenAndPersistsIdentity(t *testing.T) {
 	if err != nil || loaded.ProbeID != "11111111-1111-4111-8111-111111111111" {
 		t.Fatalf("config.Load() = %#v, %v", loaded, err)
 	}
+}
+
+func configFixtureJSON(body string) []byte {
+	if runtime.GOOS == "windows" {
+		body = strings.ReplaceAll(body, `\`, `\\`)
+	}
+	return []byte(body)
 }
 
 func TestRunActuallyHeartbeatsAndReturnsUnauthorized(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,10 +17,23 @@ import (
 	"github.com/Bend-Function/MasterDNS-Agent/internal/protocol"
 )
 
+func openTestSpool(t *testing.T, dir string, maxItems int, maxBytes int64) (*Spool, error) {
+	t.Helper()
+	s, err := Open(dir, maxItems, maxBytes)
+	if err == nil {
+		t.Cleanup(func() {
+			if closeErr := s.Close(); closeErr != nil {
+				t.Errorf("close test spool: %v", closeErr)
+			}
+		})
+	}
+	return s, err
+}
+
 func TestResultSurvivesReopen(t *testing.T) {
 	dir := t.TempDir()
 	want := testResult("11111111-1111-4111-8111-111111111111")
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +44,7 @@ func TestResultSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := Open(dir, 2, 1<<20)
+	reopened, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +59,7 @@ func TestResultSurvivesReopen(t *testing.T) {
 
 func TestOpenExclusivelyOwnsDirectoryUntilClose(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +69,7 @@ func TestOpenExclusivelyOwnsDirectoryUntilClose(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(dir, 2, 1<<20)
+	reopened, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatalf("Open after Close: %v", err)
 	}
@@ -66,7 +80,7 @@ func TestOpenExclusivelyOwnsDirectoryUntilClose(t *testing.T) {
 
 func TestDirectoryLockIsReleasedWhenProcessExits(t *testing.T) {
 	if os.Getenv("MASTERDNS_SPOOL_LOCK_HELPER") == "1" {
-		s, err := Open(os.Getenv("MASTERDNS_SPOOL_LOCK_DIR"), 2, 1<<20)
+		s, err := openTestSpool(t, os.Getenv("MASTERDNS_SPOOL_LOCK_DIR"), 2, 1<<20)
 		if err != nil {
 			os.Exit(2)
 		}
@@ -79,7 +93,7 @@ func TestDirectoryLockIsReleasedWhenProcessExits(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("lock helper: %v: %s", err, output)
 	}
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatalf("Open after process exit: %v", err)
 	}
@@ -89,7 +103,7 @@ func TestDirectoryLockIsReleasedWhenProcessExits(t *testing.T) {
 }
 
 func TestDuplicateKeepsFirstResult(t *testing.T) {
-	s, err := Open(t.TempDir(), 2, 1<<20)
+	s, err := openTestSpool(t, t.TempDir(), 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +128,7 @@ func TestDuplicateKeepsFirstResult(t *testing.T) {
 
 func TestPutUsesAtomicResultFile(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,14 +148,14 @@ func TestPutUsesAtomicResultFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("result mode = %o, want 600", info.Mode().Perm())
 	}
 }
 
 func TestCrashLeftTemporaryFileIsIgnored(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +172,7 @@ func TestCrashLeftTemporaryFileIsIgnored(t *testing.T) {
 }
 
 func TestFullSpoolRejectsWithoutDeletingExistingResult(t *testing.T) {
-	s, err := Open(t.TempDir(), 1, 1<<20)
+	s, err := openTestSpool(t, t.TempDir(), 1, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +198,7 @@ func TestByteCapacityRejectsOversizedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(t.TempDir(), 10, int64(len(payload)))
+	s, err := openTestSpool(t, t.TempDir(), 10, int64(len(payload)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +212,7 @@ func TestByteCapacityRejectsOversizedResult(t *testing.T) {
 
 func TestMalformedFileIsQuarantinedWithoutPoisoningBatch(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 10, 1<<20)
+	s, err := openTestSpool(t, dir, 10, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +265,7 @@ func TestMalformedFileIsQuarantinedWithoutPoisoningBatch(t *testing.T) {
 
 func TestNearNameLimitMalformedFileDoesNotPoisonValidBatch(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 10, 1<<20)
+	s, err := openTestSpool(t, dir, 10, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +295,7 @@ func TestNearNameLimitMalformedFileDoesNotPoisonValidBatch(t *testing.T) {
 
 func TestDeleteFailurePreservesReasonAndDoesNotPoisonValidBatch(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 10, 1<<20)
+	s, err := openTestSpool(t, dir, 10, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +343,7 @@ func TestDeleteFailurePreservesReasonAndDoesNotPoisonValidBatch(t *testing.T) {
 
 func TestRejectQuarantinesResultWithPayloadFreeReason(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +388,7 @@ func TestRejectQuarantinesResultWithPayloadFreeReason(t *testing.T) {
 }
 
 func TestRejectRequiresSafeReasonCode(t *testing.T) {
-	s, err := Open(t.TempDir(), 2, 1<<20)
+	s, err := openTestSpool(t, t.TempDir(), 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +407,7 @@ func TestRejectRequiresSafeReasonCode(t *testing.T) {
 
 func TestMalformedOccupantDoesNotDiscardNewValidResult(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +430,7 @@ func TestMalformedOccupantDoesNotDiscardNewValidResult(t *testing.T) {
 
 func TestQuarantineIsBounded(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 200, 1<<20)
+	s, err := openTestSpool(t, dir, 200, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +455,7 @@ func TestQuarantineIsBounded(t *testing.T) {
 func TestQuarantineIsByteBoundedAndOversizedPayloadIsRemoved(t *testing.T) {
 	dir := t.TempDir()
 	const maxBytes = int64(512)
-	s, err := Open(dir, 20, maxBytes)
+	s, err := openTestSpool(t, dir, 20, maxBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +498,7 @@ func TestQuarantineIsByteBoundedAndOversizedPayloadIsRemoved(t *testing.T) {
 
 func TestResultRemainsUntilAcknowledged(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 1<<20)
+	s, err := openTestSpool(t, dir, 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +531,7 @@ func TestResultRemainsUntilAcknowledged(t *testing.T) {
 }
 
 func TestBatchIsLimitedToOneHundred(t *testing.T) {
-	s, err := Open(t.TempDir(), 101, 1<<20)
+	s, err := openTestSpool(t, t.TempDir(), 101, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +550,7 @@ func TestBatchIsLimitedToOneHundred(t *testing.T) {
 }
 
 func TestRejectsInvalidIdentityAndResult(t *testing.T) {
-	s, err := Open(t.TempDir(), 2, 1<<20)
+	s, err := openTestSpool(t, t.TempDir(), 2, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +569,7 @@ func TestRejectsInvalidIdentityAndResult(t *testing.T) {
 }
 
 func TestConcurrentPutBatchAndAck(t *testing.T) {
-	s, err := Open(t.TempDir(), 64, 1<<20)
+	s, err := openTestSpool(t, t.TempDir(), 64, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +612,7 @@ func entryNames(entries []os.DirEntry) []string {
 }
 
 func TestCapacityAndContainsReserveCompletedResults(t *testing.T) {
-	s, err := Open(t.TempDir(), 2, 4096)
+	s, err := openTestSpool(t, t.TempDir(), 2, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +643,7 @@ func TestCapacityAndContainsReserveCompletedResults(t *testing.T) {
 
 func TestReopenCleansOnlyAbandonedInternalTemporaryFiles(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2, 4096)
+	s, err := openTestSpool(t, dir, 2, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +695,7 @@ func TestReopenCleansOnlyAbandonedInternalTemporaryFiles(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(dir, 2, 4096)
+	reopened, err := openTestSpool(t, dir, 2, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}

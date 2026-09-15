@@ -148,6 +148,15 @@ func validateTokenFile(path string) error {
 		if err != nil {
 			return fmt.Errorf("resolve tokenFile: %w", err)
 		}
+		// Windows temporary paths may use an 8.3 alias (for example,
+		// RUNNER~1). Resolve both paths before checking containment so a
+		// valid per-user token is not rejected merely because of spelling.
+		if resolved, resolveErr := filepath.EvalSymlinks(absolute); resolveErr == nil {
+			absolute = resolved
+		}
+		if resolved, resolveErr := filepath.EvalSymlinks(home); resolveErr == nil {
+			home = resolved
+		}
 		relative, err := filepath.Rel(home, absolute)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return errors.New("tokenFile must be inside the current user's directory on Windows")

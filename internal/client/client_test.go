@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -317,6 +318,9 @@ func TestReadInstallTokenFromStdinOrProtectedFile(t *testing.T) {
 	if err != nil || got != "file-secret" {
 		t.Fatalf("ReadInstallToken(file) = %q, %v", got, err)
 	}
+	if runtime.GOOS == "windows" {
+		return
+	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +338,7 @@ func TestPersistEnrollmentAtomicallyCreatesValidRuntimeConfig(t *testing.T) {
 		MaxConcurrency: 4, AllowIPv4: true,
 	}
 	configJSON := `{"serverUrl":"https://platform.example","probeId":"","tokenFile":"` + tokenPath + `","stateDir":"` + cfg.StateDir + `","maxConcurrency":4,"allowIpv4":true,"allowIpv6":false,"allowedPrivateCidrs":[]}`
-	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+	if err := os.WriteFile(configPath, configFixtureJSON(configJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	enrollment := protocol.Enrollment{ProbeID: "11111111-1111-4111-8111-111111111111", RuntimeToken: "runtime-secret", Protocol: protocol.Version}
@@ -346,7 +350,7 @@ func TestPersistEnrollmentAtomicallyCreatesValidRuntimeConfig(t *testing.T) {
 		t.Fatalf("runtime token = %q, %v", data, err)
 	}
 	info, err := os.Stat(tokenPath)
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && (err != nil || info.Mode().Perm() != 0o600) {
 		t.Fatalf("runtime token mode = %v, %v", info.Mode().Perm(), err)
 	}
 	loaded, err := config.Load(configPath)
@@ -372,7 +376,7 @@ func TestEnrollmentCanRecoverAfterConfigWriteFailure(t *testing.T) {
 	if err := os.WriteFile(tokenPath, oldToken, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, oldConfig, 0o600); err != nil {
+	if err := os.WriteFile(configPath, configFixtureJSON(string(oldConfig)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(configPath)
@@ -392,14 +396,14 @@ func TestEnrollmentCanRecoverAfterConfigWriteFailure(t *testing.T) {
 	if got, _ := os.ReadFile(tokenPath); !bytes.Equal(got, oldToken) {
 		t.Fatalf("old runtime token changed: %q", got)
 	}
-	if got, _ := os.ReadFile(configPath); !bytes.Equal(got, oldConfig) {
+	if got, _ := os.ReadFile(configPath); !bytes.Equal(got, configFixtureJSON(string(oldConfig))) {
 		t.Fatalf("old config changed: %q", got)
 	}
 	pendingInfo, err := os.Stat(tokenPath + ".pending")
 	if err != nil {
 		t.Fatalf("recoverable pending enrollment missing: %v", err)
 	}
-	if pendingInfo.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && pendingInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("pending enrollment mode = %v", pendingInfo.Mode().Perm())
 	}
 	recovered, err := RecoverEnrollment(configPath, cfg)
@@ -413,4 +417,11 @@ func TestEnrollmentCanRecoverAfterConfigWriteFailure(t *testing.T) {
 	if got, _ := os.ReadFile(tokenPath); strings.TrimSpace(string(got)) != enrollment.RuntimeToken {
 		t.Fatalf("recovered runtime token = %q", got)
 	}
+}
+
+func configFixtureJSON(body string) []byte {
+	if runtime.GOOS == "windows" {
+		body = strings.ReplaceAll(body, `\`, `\\`)
+	}
+	return []byte(body)
 }
