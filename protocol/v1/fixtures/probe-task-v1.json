@@ -1,0 +1,18 @@
+{
+  "protocol": "probe-agent/v1",
+  "taskId": "11111111-1111-4111-8111-111111111111",
+  "roundId": "22222222-2222-4222-8222-222222222222",
+  "probeId": "33333333-3333-4333-8333-333333333333",
+  "leaseId": "44444444-4444-4444-8444-444444444444",
+  "addressVersion": 1,
+  "configVersion": 1,
+  "address": "192.0.2.10",
+  "family": 4,
+  "hostname": "service.example.com",
+  "config": {
+    "type": "tcp",
+    "port": 443,
+    "timeoutMs": 3000
+  },
+  "deadline": "2026-09-15T12:00:00.000Z"
+}

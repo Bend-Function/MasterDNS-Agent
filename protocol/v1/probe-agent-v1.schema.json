@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://masterdns.example/schemas/probe-agent-v1.schema.json",
+  "title": "MasterDNS Probe Agent Protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/ProbeTask" },
+    { "$ref": "#/$defs/ProbeResult" }
+  ],
+  "$defs": {
+    "Uuid": { "type": "string", "format": "uuid" },
+    "Timestamp": { "type": "string", "format": "date-time" },
+    "Version": { "type": "integer", "minimum": 1 },
+    "TcpCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port"],
+      "properties": {
+        "type": { "const": "tcp" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000, "default": 3000 }
+      }
+    },
+    "HttpCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "http" },
+        "protocol": { "enum": ["http", "https"], "default": "https" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "method": { "enum": ["GET", "HEAD"], "default": "GET" },
+        "path": { "type": "string", "pattern": "^/", "default": "/" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" }, "default": {} },
+        "expectedStatuses": { "type": "array", "items": { "type": "integer", "minimum": 100, "maximum": 599 } },
+        "expectedStatusMin": { "type": "integer", "minimum": 100, "maximum": 599, "default": 200 },
+        "expectedStatusMax": { "type": "integer", "minimum": 100, "maximum": 599, "default": 399 },
+        "bodyContains": { "type": "string", "maxLength": 2048 },
+        "bodyPattern": { "type": "string", "maxLength": 2048 },
+        "followRedirects": { "type": "boolean", "default": true },
+        "verifyTls": { "type": "boolean", "default": true },
+        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000, "default": 3000 }
+      }
+    },
+    "NetworkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowedPrivateCIDRs"],
+      "properties": {
+        "allowedPrivateCIDRs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ProbeTask": {
+      "type": "object",
+      "$comment": "Consumers must also reject permanently forbidden targets and require CIDR containment for private targets as documented; these semantic IP rules are enforced by probeTaskSchema.",
+      "additionalProperties": false,
+      "required": ["protocol", "taskId", "roundId", "probeId", "leaseId", "addressVersion", "configVersion", "address", "family", "config", "deadline"],
+      "properties": {
+        "protocol": { "const": "probe-agent/v1" },
+        "taskId": { "$ref": "#/$defs/Uuid" },
+        "roundId": { "$ref": "#/$defs/Uuid" },
+        "probeId": { "$ref": "#/$defs/Uuid" },
+        "leaseId": { "$ref": "#/$defs/Uuid" },
+        "addressVersion": { "$ref": "#/$defs/Version" },
+        "configVersion": { "$ref": "#/$defs/Version" },
+        "address": { "type": "string", "oneOf": [{ "format": "ipv4" }, { "format": "ipv6" }] },
+        "family": { "enum": [4, 6] },
+        "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "config": { "oneOf": [{ "$ref": "#/$defs/TcpCheck" }, { "$ref": "#/$defs/HttpCheck" }] },
+        "deadline": { "$ref": "#/$defs/Timestamp" },
+        "networkPolicy": { "$ref": "#/$defs/NetworkPolicy" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "family": { "const": 4 } }, "required": ["family"] },
+          "then": { "properties": { "address": { "format": "ipv4" } } }
+        },
+        {
+          "if": { "properties": { "family": { "const": 6 } }, "required": ["family"] },
+          "then": { "properties": { "address": { "format": "ipv6" } } }
+        }
+      ]
+    },
+    "ProbeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "taskId", "leaseId", "addressVersion", "configVersion", "outcome", "latencyMs", "measuredAt"],
+      "properties": {
+        "protocol": { "const": "probe-agent/v1" },
+        "taskId": { "$ref": "#/$defs/Uuid" },
+        "leaseId": { "$ref": "#/$defs/Uuid" },
+        "addressVersion": { "$ref": "#/$defs/Version" },
+        "configVersion": { "$ref": "#/$defs/Version" },
+        "outcome": { "enum": ["success", "failure", "unavailable"] },
+        "latencyMs": { "type": "number", "minimum": 0, "maximum": 60000 },
+        "measuredAt": { "$ref": "#/$defs/Timestamp" },
+        "statusCode": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "errorCode": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    }
+  }
+}
