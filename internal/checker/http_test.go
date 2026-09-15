@@ -335,6 +335,35 @@ func certPool(t *testing.T, cert *x509.Certificate) *x509.CertPool {
 	return pool
 }
 
+func TestHTTPCallerCancellationWhileReadingBodyIsUnavailable(t *testing.T) {
+	headersFlushed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "5")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("r"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(headersFlushed)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	checker := mustChecker(t, true, false, (&recordingDialer{target: server.Listener.Addr().String()}).DialContext)
+	task := httpTask("192.0.2.37", 4, server.Listener.Addr().(*net.TCPAddr).Port)
+	task.Config.BodyContains = "ready"
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan protocol.Result, 1)
+	go func() { result <- checker.Check(ctx, task) }()
+	<-headersFlushed
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	got := <-result
+	if got.Outcome != protocol.OutcomeUnavailable || got.ErrorCode != "check_canceled" {
+		t.Fatalf("Check() = %#v", got)
+	}
+}
+
 func TestHTTPTaskDeadlineBoundsBodyRead(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

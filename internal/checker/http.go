@@ -125,6 +125,11 @@ func (c *Checker) checkHTTP(ctx context.Context, task protocol.Task, result prot
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
 		result.LatencyMS = latencyMilliseconds(time.Since(started))
 		if readErr != nil {
+			if ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
+				result.Outcome = protocol.OutcomeUnavailable
+				result.ErrorCode = "check_canceled"
+				return result
+			}
 			result.Outcome = protocol.OutcomeFailure
 			result.ErrorCode = "http_failed"
 			return result
