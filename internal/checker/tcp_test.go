@@ -102,12 +102,64 @@ func TestTCPTimeoutIsFailure(t *testing.T) {
 }
 
 func TestLocalRoutingFailureIsUnavailable(t *testing.T) {
-	for _, err := range []error{syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.EAFNOSUPPORT, syscall.EADDRNOTAVAIL} {
+	for _, err := range []error{syscall.ENETUNREACH, syscall.EAFNOSUPPORT, syscall.EADDRNOTAVAIL} {
 		checker := mustChecker(t, true, false, func(context.Context, string, string) (net.Conn, error) { return nil, err })
 		got := checker.Check(context.Background(), tcpTask("192.0.2.10", 4, 443))
 		if got.Outcome != protocol.OutcomeUnavailable || got.ErrorCode != "network_unavailable" {
 			t.Fatalf("error %v: Check() = %#v", err, got)
 		}
+	}
+}
+
+func TestHostUnreachableIsTargetFailure(t *testing.T) {
+	checker := mustChecker(t, true, false, func(context.Context, string, string) (net.Conn, error) {
+		return nil, syscall.EHOSTUNREACH
+	})
+	got := checker.Check(context.Background(), tcpTask("192.0.2.10", 4, 443))
+	if got.Outcome != protocol.OutcomeFailure || got.ErrorCode != "tcp_failed" {
+		t.Fatalf("Check() = %#v", got)
+	}
+}
+
+func TestExpiredTaskDoesNotDial(t *testing.T) {
+	checker := mustChecker(t, true, false, func(context.Context, string, string) (net.Conn, error) {
+		t.Fatal("dial called for expired task")
+		return nil, nil
+	})
+	task := tcpTask("192.0.2.10", 4, 443)
+	task.Deadline = time.Now().Add(-time.Second)
+	got := checker.Check(context.Background(), task)
+	if got.Outcome != protocol.OutcomeUnavailable || got.ErrorCode != "invalid_task" {
+		t.Fatalf("Check() = %#v", got)
+	}
+}
+
+func TestTaskDeadlineOverridesTCPTimeout(t *testing.T) {
+	checker := mustChecker(t, true, false, func(ctx context.Context, _, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	task := tcpTask("192.0.2.10", 4, 443)
+	task.Config.TimeoutMS = 1000
+	task.Deadline = time.Now().Add(100 * time.Millisecond)
+	got := checker.Check(context.Background(), task)
+	if got.Outcome != protocol.OutcomeFailure || got.ErrorCode != "tcp_failed" {
+		t.Fatalf("Check() = %#v", got)
+	}
+	if got.LatencyMS < 80 || got.LatencyMS > 500 {
+		t.Fatalf("latencyMs = %f", got.LatencyMS)
+	}
+}
+
+func TestCallerCancellationIsUnavailable(t *testing.T) {
+	checker := mustChecker(t, true, false, func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return nil, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := checker.Check(ctx, tcpTask("192.0.2.10", 4, 443))
+	if got.Outcome != protocol.OutcomeUnavailable || got.ErrorCode != "check_canceled" {
+		t.Fatalf("Check() = %#v", got)
 	}
 }
 

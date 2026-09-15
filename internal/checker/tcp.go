@@ -35,6 +35,11 @@ func (c *Checker) checkTCP(ctx context.Context, task protocol.Task, result proto
 		result.Outcome = protocol.OutcomeSuccess
 		return result
 	}
+	if errors.Is(err, context.Canceled) {
+		result.Outcome = protocol.OutcomeUnavailable
+		result.ErrorCode = "check_canceled"
+		return result
+	}
 	if localNetworkUnavailable(err) {
 		result.Outcome = protocol.OutcomeUnavailable
 		result.ErrorCode = "network_unavailable"
@@ -55,6 +60,6 @@ func latencyMilliseconds(elapsed time.Duration) float64 {
 }
 
 func localNetworkUnavailable(err error) bool {
-	return errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
-		errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)
+	return errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EAFNOSUPPORT) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL)
 }
