@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+- 用户补充：不做无谓的哈希验证；协议兼容依靠解析和行为测试。仅保留安装下载产物的一次完整性校验，代码保持简洁、高效、惯用。
+
 - 仓库 `/Users/funcma/Project/MasterDNS-Agent`，分支 `codex/external-health-agent`；禁止在 master 上开发、自动合并或推送。
 - 平台开发位于另一个仓库的 `codex/multicloud-ip-rotation` 分支；本项目不能导入兄弟目录或读取平台数据库/Redis。
 - 仅支持 TCP、HTTP/HTTPS GET/HEAD；明确 IPv4/IPv6，不实现 ICMP、远程命令执行、云写操作。
@@ -29,7 +31,7 @@
 
 确定真实 remote 后设置 module path：`git remote get-url origin`，HTTPS/SSH URL 统一转换为 `host/owner/repository`，不猜测组织名。Go 源码使用该 module path 的 internal 包导入。
 
-协议 v1 由 MasterDNS 平台计划 P1 定义。复制 schema、说明和 fixture 到本仓库 `protocol/v1`，保存文件 SHA-256 清单。更新协议必须两个仓库分别提交，正常构建不得联网抓取 latest 契约。
+协议 v1 由 MasterDNS 平台计划 P1 定义。复制 schema、说明和 fixture 到本仓库 `protocol/v1`，用双方解析与行为测试验证兼容性，不增加契约哈希清单。更新协议必须两个仓库分别提交，正常构建不得联网抓取 latest 契约。
 
 ## 文件结构
 
@@ -44,19 +46,19 @@
 | `internal/runner` | 并发执行、任务过期、信号退出、结果提交 |
 | `scripts/install.sh`、`packaging/systemd` | Linux 安装、更新、卸载与服务配置 |
 | `.github/workflows` | 单元测试、交叉编译、发布校验 |
-| `protocol/v1` | 跨仓库契约、样例及哈希 |
+| `protocol/v1` | 跨仓库契约与样例 |
 
 ## 任务依赖
 
 A1 → A2/A3；A3 → A4；A1 → A5；A2+A4+A5 → A6；全部 → A7。A1 依赖平台 P1 的协议快照；A6 可通过 httptest fake 平台独立运行，真实联调依赖平台 P5–P7。
 
-## A1：可运行命令、配置与协议兼容
+## Task 1: A1 — 可运行命令、配置与协议兼容
 
 **Files:**
 - Create: `go.mod`, `.gitignore`, `cmd/masterdns-agent/main.go`
 - Create: `internal/config/config.go`, `config_test.go`
 - Create: `internal/protocol/types.go`, `validate.go`, `types_test.go`
-- Create: `protocol/v1/probe-agent-v1.schema.json`, `probe-agent-v1.md`, `fixtures/probe-task-v1.json`, `fixtures/probe-result-v1.json`, `SHA256SUMS`
+- Create: `protocol/v1/probe-agent-v1.schema.json`, `probe-agent-v1.md`, `fixtures/probe-task-v1.json`, `fixtures/probe-result-v1.json`
 - Modify: `README.md`
 
 **Interfaces:** `config.Load(path string) (Config,error)`；`protocol.ValidateTask(task Task, now time.Time) error`。JSON 字段完全对应 P1，不从 Go 字段名推断 wire naming。
@@ -110,7 +112,7 @@ func TestRejectWrongFamily(t *testing.T) {
 - [ ] fixtures 测试使用注入 now，不依赖样例时间仍在未来；提供 `readTaskFixture(t)` 帮助函数，读取 `../../protocol/v1/fixtures/probe-task-v1.json`。
 - [ ] `go test ./...` 与 `CGO_ENABLED=0 go build ./cmd/masterdns-agent` 通过；提交 A1 文件与 README。
 
-## A2：平台客户端与专属 Token
+## Task 2: A2 — 平台客户端与专属 Token
 
 **Files:**
 - Create: `internal/client/client.go`, `enroll.go`, `retry.go`, `client_test.go`
@@ -140,7 +142,7 @@ func TestUnauthorizedIsTerminal(t *testing.T) {
 - [ ] 时间以租约响应 serverTime 计算执行剩余预算，使用单调时钟维护剩余时长；避免本地时钟偏差让任务无限延长。
 - [ ] 运行 client tests 和 `go test ./...`，提交 A2 文件。
 
-## A3：双栈 TCP 与目标范围控制
+## Task 3: A3 — 双栈 TCP 与目标范围控制
 
 **Files:**
 - Create: `internal/checker/checker.go`, `network_policy.go`, `tcp.go`, `tcp_test.go`, `network_policy_test.go`
@@ -165,7 +167,7 @@ func TestNoIPv6IsUnavailable(t *testing.T) {
 - [ ] Linux/macOS 支持 IPv6 的测试环境运行实际 `::1` 测试 listener；测试注入策略只用于本地测试，IPv6 不可用时记录 skip，不能误称双栈全部实测。
 - [ ] 测试通过后提交 A3 文件和必要协议快照更新。
 
-## A4：HTTP/HTTPS、SNI 与正文规则
+## Task 4: A4 — HTTP/HTTPS、SNI 与正文规则
 
 **Files:**
 - Create: `internal/checker/http.go`, `http_test.go`, `pattern.go`, `pattern_test.go`
@@ -187,7 +189,7 @@ func TestRejectUnsupportedRegex(t *testing.T) {
 - [ ] 不兼容的 regexp 返回配置错误/unavailable，不将其算成服务 failure；与平台新增 RE2 子集校验 fixture 保持一致，明确 JS lookbehind/backreference 不支持。
 - [ ] 用本地注入的 CA 验证 SNI 成功/失败，无需关闭正常测试 TLS 校验。HTTP/TCP 全套测试通过后提交。
 
-## A5：有界结果缓存与幂等确认
+## Task 5: A5 — 有界结果缓存与幂等确认
 
 **Files:**
 - Create: `internal/spool/spool.go`, `spool_test.go`
@@ -214,7 +216,7 @@ func TestDuplicateDoesNotGrowSpool(t *testing.T) {
 - [ ] 缓存保留原 leaseId/版本/measuredAt；不能为了通过服务端校验替换为新的租约 ID。
 - [ ] `go test -race ./internal/spool` 通过后提交。
 
-## A6：调度主循环与平台联调
+## Task 6: A6 — 调度主循环与平台联调
 
 **Files:**
 - Create: `internal/runner/runner.go`, `clock.go`, `runner_test.go`
@@ -241,7 +243,7 @@ func TestExpiredTaskIsNotExecuted(t *testing.T) {
 - [ ] 使用平台 P5–P7 的隔离测试 API，验证注册→领租约→TCP/HTTPS→上报→轮次聚合。平台聚合轮次与 Agent 一次探测职责分开，不在 Agent 重试网络探测来伪造连续成功。
 - [ ] `go test -race ./...` 和真实服务联调完成后提交；未具备平台环境的联调明确记录未执行。
 
-## A7：安装、更新、交叉构建与发布
+## Task 7: A7 — 安装、更新、交叉构建与发布
 
 **Files:**
 - Create: `scripts/install.sh`, `scripts/test-install.sh`, `scripts/build.sh`
@@ -276,7 +278,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -o dist/masterdns-age
 ```
 
 - [ ] CI 普通提交跑 test/vet/构建；只有显式发布 tag 才生成 release，开发任务不自动 push tag。Linux amd64/arm64 用实际主机/runner 验证服务安装与 TCP/IPv6；Windows/macOS 至少本地/CI 原生运行测试，交叉编译成功不写成已实机验收。
-- [ ] 文档说明协议版本、运行/安装命令、IPv6 能力、权限、结果缓冲、日志、Go RE2、HTTP 重定向范围和升级兼容。记录平台/Agent 两边 commit 与协议哈希，更新 README，提交 A7 文件。
+- [ ] 文档说明协议版本、运行/安装命令、IPv6 能力、权限、结果缓冲、日志、Go RE2、HTTP 重定向范围和升级兼容。记录平台/Agent 两边 commit 与协议版本，更新 README，提交 A7 文件。
 
 ## 自检与完成条件
 
