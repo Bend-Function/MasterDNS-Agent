@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +26,9 @@ func TestResultSurvivesReopen(t *testing.T) {
 	if err := s.Put(want); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	reopened, err := Open(dir, 2, 1<<20)
 	if err != nil {
@@ -35,6 +40,51 @@ func TestResultSurvivesReopen(t *testing.T) {
 	}
 	if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("reopened batch = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenExclusivelyOwnsDirectoryUntilClose(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, 2, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir, 2, 1<<20); !errors.Is(err, ErrInUse) {
+		t.Fatalf("second Open error = %v, want ErrInUse", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir, 2, 1<<20)
+	if err != nil {
+		t.Fatalf("Open after Close: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDirectoryLockIsReleasedWhenProcessExits(t *testing.T) {
+	if os.Getenv("MASTERDNS_SPOOL_LOCK_HELPER") == "1" {
+		s, err := Open(os.Getenv("MASTERDNS_SPOOL_LOCK_DIR"), 2, 1<<20)
+		if err != nil {
+			os.Exit(2)
+		}
+		_ = s
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	command := exec.Command(os.Args[0], "-test.run=TestDirectoryLockIsReleasedWhenProcessExits")
+	command.Env = append(os.Environ(), "MASTERDNS_SPOOL_LOCK_HELPER=1", "MASTERDNS_SPOOL_LOCK_DIR="+dir)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("lock helper: %v: %s", err, output)
+	}
+	s, err := Open(dir, 2, 1<<20)
+	if err != nil {
+		t.Fatalf("Open after process exit: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -157,7 +207,7 @@ func TestMalformedFileIsQuarantinedWithoutPoisoningBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	badName := "22222222-2222-4222-8222-222222222222" + resultFileSuffix
-	if err := os.WriteFile(filepath.Join(dir, resultsDirName, badName), []byte(`{"protocol":"wrong"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, resultsDirName, badName), []byte(`{"secret-corrupt-marker"`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,8 +225,91 @@ func TestMalformedFileIsQuarantinedWithoutPoisoningBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(quarantined) != 1 {
-		t.Fatalf("quarantine entries = %d, want 1", len(quarantined))
+	if len(quarantined) != 2 {
+		t.Fatalf("quarantine entries = %d, want payload and reason metadata", len(quarantined))
+	}
+	for _, entry := range quarantined {
+		if !strings.HasSuffix(entry.Name(), quarantineMetadataSuffix) {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(dir, quarantineDirName, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var metadata quarantineMetadata
+		if err := json.Unmarshal(payload, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if metadata.ReasonCode != "malformed_json" {
+			t.Fatalf("reason code = %q", metadata.ReasonCode)
+		}
+		if strings.Contains(string(payload), "secret-corrupt-marker") {
+			t.Fatal("quarantine metadata contains corrupt payload")
+		}
+	}
+}
+
+func TestRejectQuarantinesResultWithPayloadFreeReason(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, 2, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := testResult("11111111-1111-4111-8111-111111111111")
+	result.ErrorCode = "secret-result-marker"
+	if err := s.Put(result); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reject(result.TaskID, "lease_rejected"); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := s.Batch(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 0 {
+		t.Fatalf("rejected result remains uploadable: %#v", batch)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, quarantineDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundReason := false
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), quarantineMetadataSuffix) {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(dir, quarantineDirName, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(payload), "secret-result-marker") {
+			t.Fatal("quarantine reason metadata contains result payload")
+		}
+		if strings.Contains(string(payload), "lease_rejected") {
+			foundReason = true
+		}
+	}
+	if !foundReason {
+		t.Fatal("quarantine reason metadata not found")
+	}
+}
+
+func TestRejectRequiresSafeReasonCode(t *testing.T) {
+	s, err := Open(t.TempDir(), 2, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := testResult("11111111-1111-4111-8111-111111111111")
+	if err := s.Put(result); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reject(result.TaskID, "payload: secret value"); err == nil {
+		t.Fatal("Reject accepted unsafe reason code")
+	}
+	batch, err := s.Batch(100)
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("unsafe rejection removed result: batch=%#v err=%v", batch, err)
 	}
 }
 
@@ -224,6 +357,50 @@ func TestQuarantineIsBounded(t *testing.T) {
 	}
 	if len(entries) > maxQuarantineItems {
 		t.Fatalf("quarantine has %d entries", len(entries))
+	}
+}
+
+func TestQuarantineIsByteBoundedAndOversizedPayloadIsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	const maxBytes = int64(512)
+	s, err := Open(dir, 20, maxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("%08x-1111-4111-8111-%012x%s", i, i, resultFileSuffix)
+		payload := []byte(`{"invalid":"` + strings.Repeat("x", 180) + `"}`)
+		if i == 0 {
+			payload = []byte(strings.Repeat("x", int(maxBytes)+1))
+		}
+		if err := os.WriteFile(filepath.Join(dir, resultsDirName, name), payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Batch(100); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, quarantineDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += info.Size()
+	}
+	if total > maxBytes {
+		t.Fatalf("quarantine bytes = %d, limit = %d", total, maxBytes)
+	}
+	remaining, err := os.ReadDir(filepath.Join(dir, resultsDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("malformed inputs remain in results: %v", entryNames(remaining))
 	}
 }
 
