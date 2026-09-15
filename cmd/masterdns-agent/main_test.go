@@ -24,12 +24,57 @@ import (
 )
 
 func TestVersionCommand(t *testing.T) {
+	previousVersion, previousCommit := version, commit
+	version, commit = "v1.2.3", "abc123"
+	t.Cleanup(func() { version, commit = previousVersion, previousCommit })
 	var out bytes.Buffer
 	if err := execute([]string{"version"}, &out); err != nil {
 		t.Fatalf("execute() error = %v", err)
 	}
-	if got := strings.TrimSpace(out.String()); got != version {
-		t.Fatalf("version output = %q, want %q", got, version)
+	if got := strings.TrimSpace(out.String()); got != "masterdns-agent v1.2.3 (abc123)" {
+		t.Fatalf("version output = %q", got)
+	}
+}
+
+func TestConfigCheckValidatesWithoutRuntimeActivity(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("runtime-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		ServerURL: "https://masterdns.example", ProbeID: "11111111-1111-4111-8111-111111111111",
+		TokenFile: token, StateDir: filepath.Join(dir, "state"), MaxConcurrency: 1, AllowIPv4: true,
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := execute([]string{"config-check", "--config", path}, &out); err != nil {
+		t.Fatalf("config-check error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "configuration valid" {
+		t.Fatalf("config-check output = %q", got)
+	}
+	if _, err := os.Stat(cfg.StateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config-check created state directory: %v", err)
+	}
+}
+
+func TestConfigCheckRejectsMissingConfigAndArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"config-check"},
+		{"config-check", "--config", "does-not-exist.json"},
+		{"config-check", "--config", "config.json", "extra"},
+	} {
+		if err := execute(args, &bytes.Buffer{}); err == nil {
+			t.Fatalf("execute(%q) accepted invalid input", args)
+		}
 	}
 }
 

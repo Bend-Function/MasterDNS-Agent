@@ -1,3 +1,4 @@
 /masterdns-agent
+/dist/
 *.test
 coverage.out

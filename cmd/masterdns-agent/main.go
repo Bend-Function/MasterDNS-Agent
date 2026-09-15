@@ -18,7 +18,10 @@ import (
 	"github.com/Bend-Function/MasterDNS-Agent/internal/spool"
 )
 
-var version = "dev"
+var (
+	version = "dev"
+	commit  = "unknown"
+)
 
 func main() {
 	if err := execute(os.Args[1:], os.Stdout); err != nil {
@@ -45,14 +48,32 @@ func execute(args []string, out io.Writer) error {
 
 func executeWithInput(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: masterdns-agent <version|enroll|run>")
+		return errors.New("usage: masterdns-agent <version|enroll|run|config-check>")
 	}
 	switch args[0] {
 	case "version":
 		if len(args) != 1 {
 			return errors.New("version accepts no arguments")
 		}
-		_, err := fmt.Fprintln(out, version)
+		_, err := fmt.Fprintf(out, "masterdns-agent %s (%s)\n", version, commit)
+		return err
+	case "config-check":
+		flags := flag.NewFlagSet("config-check", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configPath := flags.String("config", "", "path to agent configuration")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *configPath == "" {
+			return errors.New("config-check requires --config")
+		}
+		if flags.NArg() != 0 {
+			return errors.New("config-check accepts no positional arguments")
+		}
+		if _, err := config.Load(*configPath); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(out, "configuration valid")
 		return err
 	case "run":
 		flags := flag.NewFlagSet("run", flag.ContinueOnError)

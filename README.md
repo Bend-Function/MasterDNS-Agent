@@ -10,8 +10,12 @@ Go 1.26 or newer is required.
 
 ```sh
 go test ./...
-CGO_ENABLED=0 go build ./cmd/masterdns-agent
+sh scripts/build.sh
 ```
+
+The build script writes Linux, macOS, and Windows binaries for amd64 and arm64,
+plus `SHA256SUMS`, to `dist/`. Version and commit metadata are embedded at build
+time.
 
 ## Configuration
 
@@ -69,10 +73,23 @@ to persist their results. Unsent results are uploaded on the next run. Exit code
 and `3` means platform authentication was rejected and enrollment is required.
 A storage failure that prevents durable shutdown is reported as an error.
 
-The `version` command prints the build version:
+The `version` command prints the build version and commit:
 
 ```sh
 masterdns-agent version
 ```
+
+Validate configuration without contacting the platform or opening the result
+buffer:
+
+```sh
+masterdns-agent config-check --config /etc/masterdns-agent/config.json
+```
+
+Pinned Linux installation, updates, systemd hardening, uninstall behavior, and
+foreground macOS/Windows use are documented in [`docs/INSTALL.md`](docs/INSTALL.md).
+The operational wire examples and compatibility rules are in
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md), with validation scope and native-platform
+limitations in [`docs/VALIDATION.md`](docs/VALIDATION.md).
 
 The versioned wire contract and fixtures are in [`protocol/v1`](protocol/v1).

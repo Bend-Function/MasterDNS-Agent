@@ -1,0 +1,64 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-15-intel
+          - macos-15
+          - windows-2025
+          - windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+
+  linux-packaging:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race ./...
+      - run: sh scripts/test-install.sh
+      - name: Build all release targets
+        run: sh scripts/build.sh
+      - name: Validate systemd installation
+        run: |
+          if ! id masterdns-agent >/dev/null 2>&1; then
+            sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin masterdns-agent
+          fi
+          sudo install -d -m 0700 -o masterdns-agent -g masterdns-agent /etc/masterdns-agent /var/lib/masterdns-agent
+          sudo install -m 0755 "dist/masterdns-agent-linux-$(go env GOARCH)" /usr/local/bin/masterdns-agent
+          sudo install -m 0644 packaging/systemd/masterdns-agent.service /etc/systemd/system/masterdns-agent.service
+          sudo systemd-analyze verify /etc/systemd/system/masterdns-agent.service
+          sudo systemctl daemon-reload
+          systemctl cat masterdns-agent.service
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-build-${{ matrix.runner }}
+          path: dist/
