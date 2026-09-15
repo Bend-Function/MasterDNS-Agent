@@ -46,18 +46,92 @@ jobs:
       - run: go test -race ./...
       - run: sh scripts/test-install.sh
       - name: Build all release targets
+        env:
+          VERSION: v0.0.0-ci
+          COMMIT: ${{ github.sha }}
         run: sh scripts/build.sh
-      - name: Validate systemd installation
+      - name: Install, enroll, and probe through systemd
+        shell: bash
         run: |
-          if ! id masterdns-agent >/dev/null 2>&1; then
-            sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin masterdns-agent
+          set -euo pipefail
+          fixture_dir="$RUNNER_TEMP/masterdns-systemd-fixture"
+          release_root="$RUNNER_TEMP/masterdns-release"
+          release_dir="$release_root/v0.0.0-ci"
+          fixture_pid=
+          ipv4_added=0
+          ipv6_added=0
+          cleanup() {
+            set +e
+            sudo sh scripts/install.sh uninstall --purge
+            if [[ -n "$fixture_pid" ]]; then kill "$fixture_pid"; fi
+            if [[ "$ipv4_added" == 1 ]]; then sudo ip addr del 192.0.2.10/32 dev lo; fi
+            if [[ "$ipv6_added" == 1 ]]; then sudo ip -6 addr del 2001:db8::10/128 dev lo; fi
+          }
+          trap cleanup EXIT
+
+          mkdir -p "$fixture_dir" "$release_dir"
+          artifact="masterdns-agent-linux-$(go env GOARCH)"
+          cp "dist/$artifact" "$release_dir/$artifact"
+          awk -v name="$artifact" '$2 == name { print }' dist/SHA256SUMS >"$release_dir/SHA256SUMS"
+          cp packaging/systemd/masterdns-agent.service "$release_dir/masterdns-agent.service"
+          go build -trimpath -o "$fixture_dir/server" ./tests/systemd-fixture
+
+          sudo ip addr add 192.0.2.10/32 dev lo
+          ipv4_added=1
+          sudo ip -6 addr add 2001:db8::10/128 dev lo nodad
+          ipv6_added=1
+          "$fixture_dir/server" --dir "$fixture_dir" >"$fixture_dir/server.log" 2>&1 &
+          fixture_pid=$!
+          for _ in {1..20}; do
+            [[ ! -f "$fixture_dir/ready" ]] || break
+            sleep 0.5
+          done
+          if [[ ! -f "$fixture_dir/ready" ]]; then
+            cat "$fixture_dir/server.log"
+            exit 1
           fi
-          sudo install -d -m 0700 -o masterdns-agent -g masterdns-agent /etc/masterdns-agent /var/lib/masterdns-agent
-          sudo install -m 0755 "dist/masterdns-agent-linux-$(go env GOARCH)" /usr/local/bin/masterdns-agent
-          sudo install -m 0644 packaging/systemd/masterdns-agent.service /etc/systemd/system/masterdns-agent.service
+
+          sudo env \
+            MASTERDNS_TEST_MODE=1 \
+            MASTERDNS_TEST_RELEASE_DIR="$release_root" \
+            sh scripts/install.sh install \
+              --version v0.0.0-ci \
+              --server-url https://127.0.0.1:18443
+          sudo install -m 0644 "$fixture_dir/ca.pem" /etc/masterdns-agent/ci-ca.pem
+          cat >"$fixture_dir/config.json" <<'EOF'
+          {
+            "serverUrl": "https://127.0.0.1:18443",
+            "caFile": "/etc/masterdns-agent/ci-ca.pem",
+            "probeId": "",
+            "tokenFile": "/etc/masterdns-agent/runtime-token",
+            "stateDir": "/var/lib/masterdns-agent",
+            "maxConcurrency": 2,
+            "allowIpv4": true,
+            "allowIpv6": true,
+            "allowedPrivateCidrs": []
+          }
+          EOF
+          sudo install -m 0600 -o masterdns-agent -g masterdns-agent \
+            "$fixture_dir/config.json" /etc/masterdns-agent/config.json
+          printf '%s\n' 'ci-install-token' | \
+            sudo -u masterdns-agent /usr/local/bin/masterdns-agent enroll \
+              --config /etc/masterdns-agent/config.json
+          sudo systemctl start masterdns-agent.service
           sudo systemd-analyze verify /etc/systemd/system/masterdns-agent.service
-          sudo systemctl daemon-reload
-          systemctl cat masterdns-agent.service
+
+          for _ in {1..30}; do
+            [[ ! -f "$fixture_dir/failed" ]] || break
+            [[ ! -f "$fixture_dir/passed" ]] || break
+            sleep 1
+          done
+          if [[ -f "$fixture_dir/failed" || ! -f "$fixture_dir/passed" ]]; then
+            cat "$fixture_dir/server.log"
+            [[ ! -f "$fixture_dir/failed" ]] || cat "$fixture_dir/failed"
+            sudo journalctl -u masterdns-agent.service --no-pager
+            exit 1
+          fi
+          sudo systemctl is-active --quiet masterdns-agent.service
+          cat "$fixture_dir/passed"
       - uses: actions/upload-artifact@v4
         with:
           name: cross-build-${{ matrix.runner }}

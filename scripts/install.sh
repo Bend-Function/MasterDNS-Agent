@@ -4,12 +4,15 @@ set -eu
 RELEASE_ORIGIN=https://github.com/Bend-Function/MasterDNS-Agent/releases/download
 SERVICE_NAME=masterdns-agent
 SERVICE_USER=masterdns-agent
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+TEST_MODE=${MASTERDNS_TEST_MODE:-0}
 TEST_ROOT=${MASTERDNS_TEST_ROOT:-}
 VERSION=
 SERVER_URL=
 PURGE=0
 WORK_DIR=
+UPDATE_BACKUP=
+UPDATE_PENDING=0
+UPDATE_RESTART=0
 
 usage() {
 	cat >&2 <<'EOF'
@@ -28,11 +31,39 @@ die() {
 }
 
 cleanup() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	if [ "$UPDATE_PENDING" -eq 1 ]; then
+		if [ -f "$UPDATE_BACKUP" ] && [ ! -L "$UPDATE_BACKUP" ]; then
+			if [ "$UPDATE_RESTART" -eq 1 ]; then
+				run_systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+			fi
+			if atomic_replace "$UPDATE_BACKUP" "$BINARY"; then
+				UPDATE_BACKUP=
+				if [ "$UPDATE_RESTART" -eq 1 ] && ! start_service_checked; then
+					echo "masterdns-agent installer: restored old binary but service restart failed" >&2
+					status=1
+				fi
+			else
+				echo "masterdns-agent installer: failed to restore old binary" >&2
+				status=1
+			fi
+		else
+			echo "masterdns-agent installer: update backup is missing or unsafe" >&2
+			status=1
+		fi
+	elif [ -n "$UPDATE_BACKUP" ]; then
+		rm -f "$UPDATE_BACKUP"
+	fi
 	if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
 		rm -rf "$WORK_DIR"
 	fi
+	exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap 'cleanup $?' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 [ "$#" -ge 1 ] || usage
 COMMAND=$1
@@ -68,20 +99,43 @@ esac
 [ "$COMMAND" = install ] || [ -z "$SERVER_URL" ] || usage
 [ "$COMMAND" = uninstall ] || [ "$PURGE" -eq 0 ] || usage
 
-if [ -n "$TEST_ROOT" ]; then
-	[ "$TEST_ROOT" != / ] || die "test root must not be /"
-	case "$TEST_ROOT" in /*) ;; *) die "test root must be absolute" ;; esac
+case "$TEST_MODE" in 0|1) ;; *) die "MASTERDNS_TEST_MODE must be 0 or 1" ;; esac
+if [ -n "$TEST_ROOT" ] && [ "$TEST_MODE" -ne 1 ]; then
+	die "MASTERDNS_TEST_ROOT requires MASTERDNS_TEST_MODE=1"
+fi
+
+if [ "$TEST_MODE" -eq 1 ]; then
+	if [ -n "$TEST_ROOT" ]; then
+		[ "$TEST_ROOT" != / ] || die "test root must not be /"
+		case "$TEST_ROOT" in /*) ;; *) die "test root must be absolute" ;; esac
+	fi
 	OS=${MASTERDNS_TEST_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}
 	ARCH=${MASTERDNS_TEST_ARCH:-$(uname -m)}
-	SYSTEMCTL=${MASTERDNS_TEST_SYSTEMCTL:-:}
+	if [ -n "$TEST_ROOT" ]; then
+		SYSTEMCTL=${MASTERDNS_TEST_SYSTEMCTL:-:}
+	else
+		SYSTEMCTL=${MASTERDNS_TEST_SYSTEMCTL:-systemctl}
+	fi
 	RELEASE_DIR=${MASTERDNS_TEST_RELEASE_DIR:-}
+	STARTUP_CHECKS=${MASTERDNS_TEST_STARTUP_CHECKS:-11}
+	STARTUP_DELAY=${MASTERDNS_TEST_STARTUP_DELAY:-1}
 else
 	OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 	ARCH=$(uname -m)
 	SYSTEMCTL=systemctl
 	RELEASE_DIR=
 	TEST_ROOT=
+	STARTUP_CHECKS=11
+	STARTUP_DELAY=1
+	if [ -n "${MASTERDNS_TEST_RELEASE_DIR:-}${MASTERDNS_TEST_SYSTEMCTL:-}${MASTERDNS_TEST_OS:-}${MASTERDNS_TEST_ARCH:-}" ]; then
+		die "test overrides require MASTERDNS_TEST_MODE=1"
+	fi
 fi
+
+case "$STARTUP_CHECKS:$STARTUP_DELAY" in
+*[!0-9:]*) die "invalid startup verification settings" ;;
+esac
+[ "$STARTUP_CHECKS" -gt 0 ] || die "startup verification requires at least one check"
 
 case "$ARCH" in
 x86_64|amd64) ARCH=amd64 ;;
@@ -113,10 +167,22 @@ run_systemctl() {
 	"$SYSTEMCTL" "$@"
 }
 
+start_service_checked() {
+	run_systemctl start "$SERVICE_NAME.service" || return 1
+	check=0
+	while [ "$check" -lt "$STARTUP_CHECKS" ]; do
+		run_systemctl is-active --quiet "$SERVICE_NAME.service" || return 1
+		check=$((check + 1))
+		if [ "$check" -lt "$STARTUP_CHECKS" ] && [ "$STARTUP_DELAY" -gt 0 ]; then
+			sleep "$STARTUP_DELAY"
+		fi
+	done
+}
+
 fetch() {
 	name=$1
 	destination=$2
-	if [ -n "$TEST_ROOT" ] && [ -n "$RELEASE_DIR" ]; then
+	if [ "$TEST_MODE" -eq 1 ] && [ -n "$RELEASE_DIR" ]; then
 		cp "$RELEASE_DIR/$VERSION/$name" "$destination"
 	else
 		curl -fsSL --proto '=https' --tlsv1.2 \
@@ -137,7 +203,6 @@ sha256_file() {
 download_binary() {
 	artifact="masterdns-agent-$OS-$ARCH"
 	[ "$OS" != windows ] || artifact="$artifact.exe"
-	mkdir -p "$BIN_DIR"
 	WORK_DIR=$(mktemp -d "$BIN_DIR/.masterdns-agent-install.XXXXXX")
 	manifest=$WORK_DIR/SHA256SUMS
 	candidate=$WORK_DIR/masterdns-agent
@@ -168,23 +233,66 @@ create_service_user() {
 	fi
 }
 
+ensure_directory() {
+	path=$1
+	mode=$2
+	if [ -L "$path" ]; then
+		die "refusing symbolic-link directory: $path"
+	fi
+	if [ -e "$path" ]; then
+		[ -d "$path" ] || die "managed path is not a directory: $path"
+	else
+		install -d -m "$mode" "$path"
+	fi
+	chmod "$mode" "$path"
+}
+
+ensure_regular_or_absent() {
+	path=$1
+	if [ -L "$path" ]; then
+		die "refusing symbolic-link file: $path"
+	fi
+	if [ -e "$path" ] && [ ! -f "$path" ]; then
+		die "managed path is not a regular file: $path"
+	fi
+}
+
+atomic_replace() {
+	source=$1
+	destination=$2
+	if [ "$TEST_MODE" -eq 1 ] && [ "${MASTERDNS_TEST_FAIL_NEXT_REPLACE:-}" = 1 ]; then
+		MASTERDNS_TEST_FAIL_NEXT_REPLACE=0
+		return 1
+	fi
+	if [ -n "$TEST_ROOT" ]; then
+		mv -f "$source" "$destination"
+	else
+		mv -fT -- "$source" "$destination"
+	fi
+}
+
+require_directory() {
+	path=$1
+	[ ! -L "$path" ] || die "refusing symbolic-link directory: $path"
+	[ -d "$path" ] || die "managed directory is missing or unsafe: $path"
+}
+
 create_directories() {
-	install -d -m 0755 "$BIN_DIR" "$SYSTEMD_DIR"
-	install -d -m 0700 "$CONFIG_DIR" "$STATE_DIR"
+	ensure_directory "$BIN_DIR" 0755
+	ensure_directory "$SYSTEMD_DIR" 0755
+	ensure_directory "$CONFIG_DIR" 0700
+	ensure_directory "$STATE_DIR" 0700
 	if [ -z "$TEST_ROOT" ]; then
 		chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR" "$STATE_DIR"
 	fi
 }
 
 install_service() {
-	unit_source=$SCRIPT_DIR/../packaging/systemd/masterdns-agent.service
-	if [ -r "$unit_source" ]; then
-		install -m 0644 "$unit_source" "$SERVICE_FILE"
-	else
-		unit_source=$WORK_DIR/masterdns-agent.service
-		fetch masterdns-agent.service "$unit_source"
-		install -m 0644 "$unit_source" "$SERVICE_FILE"
-	fi
+	unit_source=$WORK_DIR/masterdns-agent.service
+	fetch masterdns-agent.service "$unit_source"
+	chmod 0644 "$unit_source"
+	ensure_regular_or_absent "$SERVICE_FILE"
+	atomic_replace "$unit_source" "$SERVICE_FILE"
 	run_systemctl daemon-reload
 }
 
@@ -197,7 +305,8 @@ write_initial_config() {
 	printf '%s\n' "$SERVER_URL" | grep -Eq '^https://[^[:space:]]+$' || die "server URL must use HTTPS"
 	escaped_url=$(printf '%s' "$SERVER_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')
 	umask 077
-	cat >"$CONFIG" <<EOF
+	config_candidate=$WORK_DIR/config.json
+	cat >"$config_candidate" <<EOF
 {
   "serverUrl": "$escaped_url",
   "probeId": "",
@@ -209,17 +318,22 @@ write_initial_config() {
   "allowedPrivateCidrs": []
 }
 EOF
-	chmod 0600 "$CONFIG"
+	chmod 0600 "$config_candidate"
 	if [ -z "$TEST_ROOT" ]; then
-		chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG"
+		chown "$SERVICE_USER:$SERVICE_USER" "$config_candidate"
 	fi
+	ensure_regular_or_absent "$CONFIG"
+	[ ! -e "$CONFIG" ] || die "configuration appeared during installation"
+	atomic_replace "$config_candidate" "$CONFIG"
 }
 
 install_agent() {
 	require_mutation_access
+	ensure_regular_or_absent "$BINARY"
 	[ ! -e "$BINARY" ] || die "agent is already installed; use update"
 	create_service_user
 	create_directories
+	ensure_regular_or_absent "$CONFIG"
 	download_binary
 	if [ ! -e "$CONFIG" ]; then
 		write_initial_config
@@ -233,38 +347,71 @@ install_agent() {
 
 update_agent() {
 	require_mutation_access
+	require_directory "$BIN_DIR"
+	require_directory "$CONFIG_DIR"
+	require_directory "$STATE_DIR"
+	ensure_regular_or_absent "$BINARY"
 	[ -x "$BINARY" ] || die "agent is not installed"
+	ensure_regular_or_absent "$CONFIG"
 	[ -r "$CONFIG" ] || die "configuration is missing"
 	download_binary
 	"$DOWNLOADED_BINARY" config-check --config "$CONFIG" >/dev/null
-	backup=$BIN_DIR/.masterdns-agent.backup.$$
-	cp -p "$BINARY" "$backup"
+	UPDATE_BACKUP=$(mktemp "$BIN_DIR/.masterdns-agent.backup.XXXXXX")
+	cp -p "$BINARY" "$UPDATE_BACKUP"
+	UPDATE_PENDING=1
 	was_active=0
 	if run_systemctl is-active --quiet "$SERVICE_NAME.service" >/dev/null 2>&1; then
 		was_active=1
-		run_systemctl stop "$SERVICE_NAME.service" || {
-			rm -f "$backup"
-			die "could not stop service"
-		}
+		UPDATE_RESTART=1
+		run_systemctl stop "$SERVICE_NAME.service" || die "could not stop service"
+	else
+		state=$?
+		case "$state" in 3|4) ;; *) die "could not determine service state" ;; esac
 	fi
-	mv "$DOWNLOADED_BINARY" "$BINARY"
-	chmod 0755 "$BINARY"
-	if [ "$was_active" -eq 1 ] &&
-		{ ! run_systemctl start "$SERVICE_NAME.service" || ! run_systemctl is-active --quiet "$SERVICE_NAME.service"; }
-	then
-		mv "$backup" "$BINARY"
-		if ! run_systemctl start "$SERVICE_NAME.service" || ! run_systemctl is-active --quiet "$SERVICE_NAME.service"; then
-			echo "masterdns-agent installer: restored old binary but service restart still failed" >&2
-		fi
-		die "updated service failed to start; restored old binary"
+	if [ "$TEST_MODE" -eq 1 ] && [ "${MASTERDNS_TEST_FAIL_AFTER_STOP:-}" = 1 ]; then
+		die "injected post-stop failure"
 	fi
-	rm -f "$backup"
+	if [ "$TEST_MODE" -eq 1 ] && [ "${MASTERDNS_TEST_INTERRUPT_AFTER_STOP:-}" = 1 ]; then
+		kill -TERM "$$"
+	fi
+	atomic_replace "$DOWNLOADED_BINARY" "$BINARY"
+	if [ "$was_active" -eq 1 ] && ! start_service_checked; then
+		die "updated service failed during startup verification"
+	fi
+	UPDATE_PENDING=0
+	rm -f "$UPDATE_BACKUP"
+	UPDATE_BACKUP=
 	echo "updated $SERVICE_NAME to $VERSION"
 }
 
 uninstall_agent() {
 	require_mutation_access
-	run_systemctl disable --now "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+	if run_systemctl is-active --quiet "$SERVICE_NAME.service" >/dev/null 2>&1; then
+		run_systemctl disable --now "$SERVICE_NAME.service" >/dev/null 2>&1 || die "could not stop and disable active service"
+		if run_systemctl is-active --quiet "$SERVICE_NAME.service" >/dev/null 2>&1; then
+			die "service remained active after disable --now"
+		else
+			state=$?
+			case "$state" in 3|4) ;; *) die "could not verify stopped service" ;; esac
+		fi
+	else
+		state=$?
+		case "$state" in
+		3)
+			if [ -e "$SERVICE_FILE" ] || [ -L "$SERVICE_FILE" ]; then
+				run_systemctl disable --now "$SERVICE_NAME.service" >/dev/null 2>&1 || die "could not stop and disable installed service"
+				if run_systemctl is-active --quiet "$SERVICE_NAME.service" >/dev/null 2>&1; then
+					die "service remained active after disable --now"
+				else
+					state=$?
+					case "$state" in 3|4) ;; *) die "could not verify stopped service" ;; esac
+				fi
+			fi
+			;;
+		4) ;;
+		*) die "could not determine service state" ;;
+		esac
+	fi
 	rm -f "$SERVICE_FILE" "$BINARY"
 	run_systemctl daemon-reload >/dev/null 2>&1 || true
 	if [ "$PURGE" -eq 1 ]; then

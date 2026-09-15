@@ -23,6 +23,11 @@ The script creates the unprivileged `masterdns-agent` user and these paths:
 | `/etc/masterdns-agent/config.json` | masterdns-agent, `0600` | agent configuration |
 | `/var/lib/masterdns-agent` | masterdns-agent, `0700` | bounded durable result buffer |
 
+The systemd unit is always fetched from the same pinned release as the binary;
+an adjacent checkout file is never used as an installation source. Managed
+directories and files must have their expected types, and symbolic-link paths
+are rejected before root writes or changes ownership.
+
 Installation writes an enrollment-ready configuration and enables the service,
 but does not start it. Exchange the one-time install token through standard
 input, then start the service:
@@ -57,10 +62,18 @@ fixed HTTPS release origin. It checks SHA-256 once, runs `version` and
 stopped and restarted; if startup fails, the previous executable is restored.
 Configuration and credentials are never overwritten.
 
+After starting an updated service, the installer requires it to remain active
+through a bounded ten-second observation window before deleting the backup.
+Any error or termination after the service stops restores the previous binary
+and restarts the previous service before the installer exits.
+
 ```sh
 sudo sh install.sh update --version "$VERSION"
 sudo sh install.sh uninstall
 ```
+
+Uninstall aborts before removing anything if it cannot stop an active service
+or cannot verify that the service is inactive.
 
 Normal uninstall removes the executable and unit while preserving configuration,
 credentials, and buffered results. Removing those files requires an explicit

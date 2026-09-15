@@ -21,12 +21,22 @@ their generated `SHA256SUMS`; only the Darwin arm64 output was run natively.
 The Darwin arm64 development host can run native macOS arm64 tests. It cannot
 provide native Windows, macOS amd64, or Linux service acceptance. The checked-in
 CI workflow assigns native runners for both architectures of Linux, macOS, and
-Windows; those jobs have not been executed by this development task. Linux
-systemd unit validation is configured on native amd64 and arm64 runners. An IPv6
-test may report skipped when its native runner has no usable IPv6 loopback or
-route; a skip is not recorded as IPv6 acceptance.
+Windows; those jobs have not been executed by this development task. Each Linux
+amd64 and arm64 job invokes the installer against real system paths, enrolls the
+installed binary over TLS, starts the downloaded unit with systemd, and requires
+successful TCP probes to reserved documentation IPv4 and IPv6 addresses assigned
+to loopback. Failure to configure or probe either family fails that job; it is
+not recorded as a skip.
 
 Full cross-repository P7/P9/P10 registration, probe, aggregation, and rotation
 integration remains pending. P12b will update the shared validation record with
 the final platform and agent commit IDs. Cross-compilation is build evidence
 only and is never represented as a native runtime result.
+
+The controller's P12a binary integration used platform test commit
+`0da881dabf4dae75c088a74ec00c2afed8463472` (product base `2d2a4b4`, integrated
+as `2d566f6`) and an Agent binary built from
+`5ec49f294b51ad66d47c18fc1a0db31e8335f2ba` with version
+`p12-test-5ec49f2`. It passed the actual Nest/P5 API protocol, IPv4 and IPv6 TCP,
+verified HTTPS, and revocation behavior. It did not exercise the pending
+P7/P9/P10 full rotation chain.
