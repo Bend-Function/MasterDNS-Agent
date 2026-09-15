@@ -501,3 +501,34 @@ func syncDir(path string) error {
 	defer dir.Close()
 	return dir.Sync()
 }
+
+// Available reports space for the exclusive owner's admission reservations.
+func (s *Spool) Available() (items int, bytes int64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, 0, ErrClosed
+	}
+	usedItems, usedBytes, err := s.usage()
+	if err != nil {
+		return 0, 0, err
+	}
+	return max(0, s.maxItems-usedItems), max(0, s.maxBytes-usedBytes), nil
+}
+
+// Contains prevents a new lease from replacing an unacknowledged task result.
+func (s *Spool) Contains(taskID string) (bool, error) {
+	if !protocol.ValidID(taskID) {
+		return false, errors.New("task ID must be a UUID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, ErrClosed
+	}
+	_, err := os.Stat(s.resultPath(taskID))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}

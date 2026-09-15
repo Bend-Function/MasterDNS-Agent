@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const maxConcurrency = 100
+const maxConcurrency = 64
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -60,7 +60,7 @@ func loadConfig(path string, allowTestHTTP, requireIdentity bool) (Config, error
 	}
 	defer f.Close()
 
-	var cfg Config
+	cfg := Config{MaxConcurrency: 8}
 	decoder := json.NewDecoder(f)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {

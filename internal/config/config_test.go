@@ -45,6 +45,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		"unknown field":       strings.TrimSuffix(base, "}") + `,"extra":true}`,
 		"non HTTPS server":    strings.Replace(base, "https://", "http://", 1),
 		"invalid probe UUID":  strings.Replace(base, "33333333-3333-4333-8333-333333333333", "not-a-uuid", 1),
+		"above runner limit":  strings.Replace(base, `"maxConcurrency":8`, `"maxConcurrency":65`, 1),
 		"unbounded workers":   strings.Replace(base, `"maxConcurrency":8`, `"maxConcurrency":101`, 1),
 		"zero workers":        strings.Replace(base, `"maxConcurrency":8`, `"maxConcurrency":0`, 1),
 		"no address families": strings.Replace(base, `"allowIpv4":true`, `"allowIpv4":false`, 1),
@@ -108,4 +109,17 @@ func writeConfig(t *testing.T, dir, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestLoadDefaultsConcurrencyWhenOmitted(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"serverUrl":"https://masterdns.example","probeId":"33333333-3333-4333-8333-333333333333","tokenFile":"` + token + `","stateDir":"` + dir + `","allowIpv4":true}`
+	cfg, err := Load(writeConfig(t, dir, body))
+	if err != nil || cfg.MaxConcurrency != 8 {
+		t.Fatalf("default concurrency = %d, %v", cfg.MaxConcurrency, err)
+	}
 }

@@ -596,3 +596,33 @@ func entryNames(entries []os.DirEntry) []string {
 	}
 	return names
 }
+
+func TestCapacityAndContainsReserveCompletedResults(t *testing.T) {
+	s, err := Open(t.TempDir(), 2, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	items, bytes, err := s.Available()
+	if err != nil || items != 2 || bytes != 4096 {
+		t.Fatalf("empty capacity = %d %d %v", items, bytes, err)
+	}
+	result := protocol.Result{Protocol: protocol.Version, TaskID: "11111111-1111-4111-8111-111111111111", LeaseID: "22222222-2222-4222-8222-222222222222", AddressVersion: 1, ConfigVersion: 1, Outcome: protocol.OutcomeSuccess, MeasuredAt: time.Now().UTC()}
+	if err := s.Put(result); err != nil {
+		t.Fatal(err)
+	}
+	items, bytes, err = s.Available()
+	if err != nil || items != 1 || bytes >= 4096 {
+		t.Fatalf("used capacity = %d %d %v", items, bytes, err)
+	}
+	if found, err := s.Contains(result.TaskID); err != nil || !found {
+		t.Fatalf("Contains = %v %v", found, err)
+	}
+	if _, err := s.Contains("../bad"); err == nil {
+		t.Fatal("lookup accepted invalid identity")
+	}
+	s.Close()
+	if _, _, err := s.Available(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed capacity = %v", err)
+	}
+}
