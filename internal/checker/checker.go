@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"crypto/x509"
 	"net"
 	"net/netip"
 	"time"
@@ -16,6 +17,7 @@ type Checker struct {
 	allowIPv6 bool
 	policy    NetworkPolicy
 	dial      DialContextFunc
+	rootCAs   *x509.CertPool
 }
 
 func New(allowIPv4, allowIPv6 bool, allowedPrivateCIDRs []string, dial DialContextFunc) (*Checker, error) {
@@ -40,7 +42,7 @@ func (c *Checker) Check(ctx context.Context, task protocol.Task) protocol.Result
 		result.ErrorCode = "invalid_task"
 		return result
 	}
-	if task.Config.Type != "tcp" {
+	if task.Config.Type != "tcp" && task.Config.Type != "http" {
 		result.ErrorCode = "unsupported_check"
 		return result
 	}
@@ -56,6 +58,9 @@ func (c *Checker) Check(ctx context.Context, task protocol.Task) protocol.Result
 	if err := c.policy.Validate(address, taskAllowsPrivate(task, address)); err != nil {
 		result.ErrorCode = "target_forbidden"
 		return result
+	}
+	if task.Config.Type == "http" {
+		return c.checkHTTP(ctx, task, result, measuredAt)
 	}
 	return c.checkTCP(ctx, task, result, measuredAt)
 }
