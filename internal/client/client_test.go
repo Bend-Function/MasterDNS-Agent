@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/pem"
@@ -141,7 +142,7 @@ func TestSubmitPreservesTaskAndLeaseIdentity(t *testing.T) {
 			t.Fatalf("results = %#v", got.Results)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `[{"taskId":"11111111-1111-4111-8111-111111111111","status":"duplicate"}]`)
+		io.WriteString(w, `{"results":[{"taskId":"11111111-1111-4111-8111-111111111111","status":"duplicate"}]}`)
 	}))
 	defer server.Close()
 
@@ -236,11 +237,34 @@ func TestSubmitRejectsAcknowledgementForDifferentTask(t *testing.T) {
 	result := protocol.Result{Protocol: protocol.Version, TaskID: "11111111-1111-4111-8111-111111111111"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `[{"taskId":"22222222-2222-4222-8222-222222222222","status":"accepted"}]`)
+		io.WriteString(w, `{"results":[{"taskId":"22222222-2222-4222-8222-222222222222","status":"accepted"}]}`)
 	}))
 	defer server.Close()
 	if _, err := newTestClient(server.URL, testToken).Submit(context.Background(), []protocol.Result{result}); err == nil {
 		t.Fatal("Submit accepted acknowledgement for a different task")
+	}
+}
+
+func TestSubmitRejectsBareAcknowledgementArray(t *testing.T) {
+	result := protocol.Result{Protocol: protocol.Version, TaskID: "11111111-1111-4111-8111-111111111111"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `[{"taskId":"11111111-1111-4111-8111-111111111111","status":"accepted"}]`)
+	}))
+	defer server.Close()
+	if _, err := newTestClient(server.URL, testToken).Submit(context.Background(), []protocol.Result{result}); err == nil {
+		t.Fatal("Submit accepted a bare acknowledgement array")
+	}
+}
+
+func TestLeaseRejectsExcessiveRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"serverTime":"2026-09-15T00:00:00Z","tasks":[],"retryAfterMs":3600001}`)
+	}))
+	defer server.Close()
+	if _, err := newTestClient(server.URL, testToken).Lease(context.Background(), 1); err == nil {
+		t.Fatal("Lease accepted retryAfterMs above one hour")
 	}
 }
 
@@ -328,5 +352,65 @@ func TestPersistEnrollmentAtomicallyCreatesValidRuntimeConfig(t *testing.T) {
 	loaded, err := config.Load(configPath)
 	if err != nil || loaded.ProbeID != enrollment.ProbeID {
 		t.Fatalf("config.Load() = %#v, %v", loaded, err)
+	}
+}
+
+func TestPersistEnrollmentRejectsInvalidProbeID(t *testing.T) {
+	cfg := config.Config{TokenFile: filepath.Join(t.TempDir(), "token")}
+	err := PersistEnrollment(filepath.Join(t.TempDir(), "config.json"), cfg, protocol.Enrollment{ProbeID: "not-a-uuid", RuntimeToken: "secret", Protocol: protocol.Version})
+	if err == nil {
+		t.Fatal("PersistEnrollment accepted an invalid probe ID")
+	}
+}
+
+func TestEnrollmentCanRecoverAfterConfigWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "runtime-token")
+	configPath := filepath.Join(dir, "agent.json")
+	oldToken := []byte("old-runtime-secret\n")
+	oldConfig := []byte(`{"serverUrl":"https://platform.example","probeId":"22222222-2222-4222-8222-222222222222","tokenFile":"` + tokenPath + `","stateDir":"` + filepath.Join(dir, "state") + `","maxConcurrency":1,"allowIpv4":true,"allowIpv6":false,"allowedPrivateCidrs":[]}`)
+	if err := os.WriteFile(tokenPath, oldToken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, oldConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment := protocol.Enrollment{ProbeID: "11111111-1111-4111-8111-111111111111", RuntimeToken: "new-runtime-secret", Protocol: protocol.Version}
+	err = persistEnrollment(configPath, cfg, enrollment, func(path string, data []byte, mode os.FileMode) error {
+		if path == configPath {
+			return errors.New("injected config failure")
+		}
+		return atomicWrite(path, data, mode)
+	})
+	if err == nil {
+		t.Fatal("PersistEnrollment succeeded despite injected config failure")
+	}
+	if got, _ := os.ReadFile(tokenPath); !bytes.Equal(got, oldToken) {
+		t.Fatalf("old runtime token changed: %q", got)
+	}
+	if got, _ := os.ReadFile(configPath); !bytes.Equal(got, oldConfig) {
+		t.Fatalf("old config changed: %q", got)
+	}
+	pendingInfo, err := os.Stat(tokenPath + ".pending")
+	if err != nil {
+		t.Fatalf("recoverable pending enrollment missing: %v", err)
+	}
+	if pendingInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("pending enrollment mode = %v", pendingInfo.Mode().Perm())
+	}
+	recovered, err := RecoverEnrollment(configPath, cfg)
+	if err != nil || !recovered {
+		t.Fatalf("RecoverEnrollment() = %v, %v", recovered, err)
+	}
+	loaded, err := config.Load(configPath)
+	if err != nil || loaded.ProbeID != enrollment.ProbeID {
+		t.Fatalf("recovered config = %#v, %v", loaded, err)
+	}
+	if got, _ := os.ReadFile(tokenPath); strings.TrimSpace(string(got)) != enrollment.RuntimeToken {
+		t.Fatalf("recovered runtime token = %q", got)
 	}
 }

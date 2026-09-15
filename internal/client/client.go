@@ -153,7 +153,7 @@ func (c *Client) Lease(ctx context.Context, capacity int) (LeaseResponse, error)
 		return LeaseResponse{}, err
 	}
 	response.SetReceivedAt(time.Now())
-	if response.ServerTime.IsZero() || response.RetryAfterMS < 0 || len(response.Tasks) > 100 {
+	if response.ServerTime.IsZero() || response.RetryAfterMS < 0 || response.RetryAfterMS > 3_600_000 || len(response.Tasks) > 100 {
 		return LeaseResponse{}, errors.New("platform returned invalid lease response")
 	}
 	return response, nil
@@ -163,11 +163,12 @@ func (c *Client) Submit(ctx context.Context, results []protocol.Result) ([]Ack, 
 	if len(results) < 1 || len(results) > 100 {
 		return nil, errors.New("result batch must contain between 1 and 100 items")
 	}
-	var acknowledgements []Ack
+	var response protocol.SubmitResponse
 	request := protocol.SubmitRequest{Protocol: protocol.Version, Results: results}
-	if err := c.post(ctx, "/api/v1/probe-agent/results", request, true, &acknowledgements); err != nil {
+	if err := c.post(ctx, "/api/v1/probe-agent/results", request, true, &response); err != nil {
 		return nil, err
 	}
+	acknowledgements := response.Results
 	if len(acknowledgements) != len(results) {
 		return nil, errors.New("platform returned invalid acknowledgement count")
 	}

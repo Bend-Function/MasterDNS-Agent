@@ -69,6 +69,14 @@ func executeWithInput(ctx context.Context, args []string, in io.Reader, out io.W
 		if err != nil {
 			return err
 		}
+		recovered, err := client.RecoverEnrollment(*configPath, cfg)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			_, err = fmt.Fprintln(out, "recovered pending enrollment")
+			return err
+		}
 		installToken, err := client.ReadInstallToken(*installTokenFile, in)
 		if err != nil {
 			return err

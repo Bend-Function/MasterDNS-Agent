@@ -174,6 +174,10 @@ type Ack struct {
 	Status string `json:"status"`
 }
 
+type SubmitResponse struct {
+	Results []Ack `json:"results"`
+}
+
 func DecodeTask(data []byte, task *Task) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

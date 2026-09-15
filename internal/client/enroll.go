@@ -57,20 +57,83 @@ func ReadInstallToken(path string, stdin io.Reader) (string, error) {
 }
 
 func PersistEnrollment(configPath string, cfg config.Config, enrollment protocol.Enrollment) error {
-	if enrollment.Protocol != protocol.Version || enrollment.ProbeID == "" || enrollment.RuntimeToken == "" {
-		return errors.New("invalid enrollment")
+	return persistEnrollment(configPath, cfg, enrollment, atomicWrite)
+}
+
+func persistEnrollment(configPath string, cfg config.Config, enrollment protocol.Enrollment, writeFile func(string, []byte, os.FileMode) error) error {
+	if err := validateEnrollment(enrollment); err != nil {
+		return err
 	}
-	if err := atomicWrite(cfg.TokenFile, []byte(enrollment.RuntimeToken+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write runtime token: %w", err)
+	pendingData, err := json.Marshal(enrollment)
+	if err != nil {
+		return errors.New("encode pending enrollment")
 	}
+	pendingPath := cfg.TokenFile + ".pending"
+	if err := writeFile(pendingPath, append(pendingData, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write pending enrollment: %w", err)
+	}
+
 	cfg.ProbeID = enrollment.ProbeID
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode enrolled config: %w", err)
 	}
 	data = append(data, '\n')
-	if err := atomicWrite(configPath, data, 0o600); err != nil {
-		return fmt.Errorf("write enrolled config: %w", err)
+	if err := writeFile(configPath, data, 0o600); err != nil {
+		return fmt.Errorf("write enrolled config (pending enrollment retained): %w", err)
+	}
+	if err := writeFile(cfg.TokenFile, []byte(enrollment.RuntimeToken+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write runtime token (pending enrollment retained): %w", err)
+	}
+	if err := os.Remove(pendingPath); err != nil {
+		return fmt.Errorf("remove pending enrollment: %w", err)
+	}
+	return nil
+}
+
+func RecoverEnrollment(configPath string, cfg config.Config) (bool, error) {
+	pendingPath := cfg.TokenFile + ".pending"
+	file, err := os.Open(pendingPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("open pending enrollment: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false, errors.New("pending enrollment must be a regular file")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return false, errors.New("pending enrollment must not be accessible by group or other users")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxInstallTokenBytes+1))
+	if err != nil || len(data) > maxInstallTokenBytes {
+		return false, errors.New("read pending enrollment")
+	}
+	var enrollment protocol.Enrollment
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&enrollment); err != nil {
+		return false, errors.New("decode pending enrollment")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return false, errors.New("decode pending enrollment")
+	}
+	if err := file.Close(); err != nil {
+		return false, errors.New("close pending enrollment")
+	}
+	if err := PersistEnrollment(configPath, cfg, enrollment); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func validateEnrollment(enrollment protocol.Enrollment) error {
+	if enrollment.Protocol != protocol.Version || !protocol.ValidID(enrollment.ProbeID) || enrollment.RuntimeToken == "" {
+		return errors.New("invalid enrollment")
 	}
 	return nil
 }

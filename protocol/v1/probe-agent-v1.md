@@ -41,6 +41,8 @@ Request:
 
 The capabilities describe usable local address families. Lack of an address family produces an `unavailable` result; it is not a target failure.
 
+A successful heartbeat returns HTTP 200 with an empty JSON object: `{}`.
+
 ## Lease tasks
 
 `POST /api/v1/probe-agent/tasks/lease`
@@ -59,7 +61,11 @@ Targets are public by default. An RFC 1918, carrier-grade NAT, or IPv6 unique-lo
 
 Request: `{ "protocol": "probe-agent/v1", "results": ProbeResult[] }`
 
-The batch contains 1 to 100 results. Each response item is `{ "taskId": UUID, "status": "accepted" | "duplicate" | "stale" | "rejected" }`. A duplicate is an idempotent acknowledgement. Stale and rejected observations may be retained for diagnostics but cannot update health state.
+The batch contains 1 to 100 results. The response is `{ "results": Ack[] }`,
+where each acknowledgement is `{ "taskId": UUID, "status": "accepted" |
+"duplicate" | "stale" | "rejected" }`. A duplicate is an idempotent
+acknowledgement. Stale and rejected observations may be retained for diagnostics
+but cannot update health state.
 
 `outcome` is `success`, `failure`, or `unavailable`. `latencyMs` is finite and between 0 and 60000. `errorCode` is at most 128 characters. A result must retain the task's ID, lease ID, address version, and configuration version.
 
