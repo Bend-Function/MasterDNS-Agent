@@ -24,6 +24,7 @@ masterdns-agent run --config /etc/masterdns-agent/config.json
 ```json
 {
   "serverUrl": "https://masterdns.example",
+  "caFile": "/etc/masterdns-agent/private-ca.pem",
   "probeId": "33333333-3333-4333-8333-333333333333",
   "tokenFile": "/etc/masterdns-agent/token",
   "stateDir": "/var/lib/masterdns-agent",
@@ -34,7 +35,9 @@ masterdns-agent run --config /etc/masterdns-agent/config.json
 }
 ```
 
-`serverUrl` must use HTTPS. `maxConcurrency` is limited to 100. Private targets
+`serverUrl` must use HTTPS. The optional `caFile` appends a private PEM CA to
+the system trust roots; platform TLS verification is always enabled.
+`maxConcurrency` is limited to 100. Private targets
 must be authorized by both `allowedPrivateCidrs` here and the leased task's
 `networkPolicy`; loopback, link-local, multicast, future-use IPv4, and
 IPv4-mapped IPv6 targets remain forbidden.
@@ -43,6 +46,16 @@ On Unix, the runtime token must be a regular file with no group or other access
 (for example, mode `0600`). On Windows, keep it under the current user's profile
 and restrict its ACL to that user. Do not put tokens in the configuration file,
 URL, command line, or logs.
+
+Before the first run, exchange a single-use install token from standard input or
+a protected file. Enrollment writes the runtime token with mode `0600` and adds
+the issued probe ID to the configuration atomically:
+
+```sh
+masterdns-agent enroll --config /etc/masterdns-agent/config.json
+masterdns-agent enroll --config /etc/masterdns-agent/config.json \
+  --install-token-file /etc/masterdns-agent/install-token
+```
 
 The `version` command prints the build version:
 

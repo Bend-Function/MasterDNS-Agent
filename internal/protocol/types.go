@@ -109,6 +109,71 @@ type Result struct {
 	ErrorCode      string    `json:"errorCode,omitempty"`
 }
 
+type Enrollment struct {
+	ProbeID      string `json:"probeId"`
+	RuntimeToken string `json:"runtimeToken"`
+	Protocol     string `json:"protocol"`
+}
+
+type Capabilities struct {
+	IPv4 bool `json:"ipv4"`
+	IPv6 bool `json:"ipv6"`
+}
+
+type HeartbeatRequest struct {
+	Protocol       string       `json:"protocol"`
+	AgentVersion   string       `json:"agentVersion"`
+	Capabilities   Capabilities `json:"capabilities"`
+	MaxConcurrency int          `json:"maxConcurrency"`
+}
+
+type LeaseRequest struct {
+	Protocol string `json:"protocol"`
+	Capacity int    `json:"capacity"`
+}
+
+type LeaseResponse struct {
+	ServerTime   time.Time `json:"serverTime"`
+	Tasks        []Task    `json:"tasks"`
+	RetryAfterMS int       `json:"retryAfterMs"`
+	receivedAt   time.Time
+}
+
+func (r *LeaseResponse) SetReceivedAt(receivedAt time.Time) {
+	r.receivedAt = receivedAt
+}
+
+// Remaining translates a server deadline into a duration measured with the
+// local monotonic clock, so wall-clock skew cannot extend a task lease.
+func (r LeaseResponse) Remaining(task Task, now time.Time) time.Duration {
+	remainingAtReceipt := task.Deadline.Sub(r.ServerTime)
+	if r.receivedAt.IsZero() {
+		return remainingAtReceipt
+	}
+	remaining := remainingAtReceipt - now.Sub(r.receivedAt)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+type SubmitRequest struct {
+	Protocol string   `json:"protocol"`
+	Results  []Result `json:"results"`
+}
+
+const (
+	AckAccepted  = "accepted"
+	AckDuplicate = "duplicate"
+	AckStale     = "stale"
+	AckRejected  = "rejected"
+)
+
+type Ack struct {
+	TaskID string `json:"taskId"`
+	Status string `json:"status"`
+}
+
 func DecodeTask(data []byte, task *Task) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

@@ -20,6 +20,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 
 type Config struct {
 	ServerURL           string   `json:"serverUrl"`
+	CAFile              string   `json:"caFile,omitempty"`
 	ProbeID             string   `json:"probeId"`
 	TokenFile           string   `json:"tokenFile"`
 	StateDir            string   `json:"stateDir"`
@@ -38,7 +39,21 @@ func LoadForTesting(path string) (Config, error) {
 	return load(path, true)
 }
 
+// LoadForEnrollment validates settings needed to exchange an install token,
+// before a probe ID and runtime token have been issued.
+func LoadForEnrollment(path string) (Config, error) {
+	return loadForEnrollment(path, false)
+}
+
 func load(path string, allowTestHTTP bool) (Config, error) {
+	return loadConfig(path, allowTestHTTP, true)
+}
+
+func loadForEnrollment(path string, allowTestHTTP bool) (Config, error) {
+	return loadConfig(path, allowTestHTTP, false)
+}
+
+func loadConfig(path string, allowTestHTTP, requireIdentity bool) (Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("open config %q: %w", path, err)
@@ -54,7 +69,7 @@ func load(path string, allowTestHTTP bool) (Config, error) {
 	if err := requireEOF(decoder); err != nil {
 		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
-	if err := cfg.validate(allowTestHTTP); err != nil {
+	if err := cfg.validate(allowTestHTTP, requireIdentity); err != nil {
 		return Config{}, fmt.Errorf("validate config %q: %w", path, err)
 	}
 	return cfg, nil
@@ -71,7 +86,7 @@ func requireEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func (cfg Config) validate(allowTestHTTP bool) error {
+func (cfg Config) validate(allowTestHTTP, requireIdentity bool) error {
 	u, err := url.Parse(cfg.ServerURL)
 	if err != nil || u.Host == "" || u.User != nil {
 		return errors.New("serverUrl must be an absolute URL without credentials")
@@ -81,7 +96,7 @@ func (cfg Config) validate(allowTestHTTP bool) error {
 			return errors.New("serverUrl must use HTTPS")
 		}
 	}
-	if !uuidPattern.MatchString(cfg.ProbeID) {
+	if requireIdentity && !uuidPattern.MatchString(cfg.ProbeID) {
 		return errors.New("probeId must be a UUID")
 	}
 	if cfg.TokenFile == "" {
@@ -102,7 +117,10 @@ func (cfg Config) validate(allowTestHTTP bool) error {
 			return fmt.Errorf("allowedPrivateCidrs contains invalid prefix %q", raw)
 		}
 	}
-	return validateTokenFile(cfg.TokenFile)
+	if requireIdentity {
+		return validateTokenFile(cfg.TokenFile)
+	}
+	return nil
 }
 
 func isLoopbackHost(host string) bool {

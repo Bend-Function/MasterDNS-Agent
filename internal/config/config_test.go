@@ -86,6 +86,21 @@ func TestLoadForTestingAllowsLoopbackHTTP(t *testing.T) {
 	}
 }
 
+func TestLoadForEnrollmentDoesNotRequireIssuedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"serverUrl":"https://masterdns.example","caFile":"` + filepath.Join(dir, "ca.pem") + `","probeId":"","tokenFile":"` + filepath.Join(dir, "runtime-token") + `","stateDir":"` + filepath.Join(dir, "state") + `","maxConcurrency":1,"allowIpv4":true,"allowIpv6":false,"allowedPrivateCidrs":[]}`
+	got, err := LoadForEnrollment(writeConfig(t, dir, body))
+	if err != nil {
+		t.Fatalf("LoadForEnrollment() error = %v", err)
+	}
+	if got.ProbeID != "" || got.CAFile != filepath.Join(dir, "ca.pem") {
+		t.Fatalf("LoadForEnrollment() = %#v", got)
+	}
+	if _, err := Load(writeConfig(t, dir, body)); err == nil {
+		t.Fatal("normal Load accepted config without issued identity")
+	}
+}
+
 func writeConfig(t *testing.T, dir, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "-")+".json")

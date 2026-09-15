@@ -80,6 +80,8 @@ func TestValidateTaskRejectsPermanentlyForbiddenTargets(t *testing.T) {
 		{"IPv6 loopback", "::1", 6, "::1/128"},
 		{"IPv6 link local", "fe80::1", 6, "fe80::/10"},
 		{"mapped IPv6", "::ffff:192.0.2.10", 6, "::/0"},
+		{"Alibaba metadata", "100.100.100.200", 4, "100.64.0.0/10"},
+		{"AWS IPv6 metadata", "fd00:ec2::254", 6, "fd00::/8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

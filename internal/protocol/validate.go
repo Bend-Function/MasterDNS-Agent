@@ -14,7 +14,13 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 var (
 	carrierGradeNAT = netip.MustParsePrefix("100.64.0.0/10")
 	futureIPv4      = netip.MustParsePrefix("240.0.0.0/4")
+	alibabaMetadata = netip.MustParseAddr("100.100.100.200")
+	awsIPv6Metadata = netip.MustParseAddr("fd00:ec2::254")
 )
+
+func ValidID(value string) bool {
+	return uuidPattern.MatchString(value)
+}
 
 func ValidateTask(task Task, now time.Time) error {
 	if task.Protocol != Version {
@@ -75,7 +81,7 @@ func validateNetworkPolicy(policy *NetworkPolicy) error {
 func permanentlyForbidden(addr netip.Addr) bool {
 	return addr.IsUnspecified() || addr.IsLoopback() || addr.IsLinkLocalUnicast() ||
 		addr.IsLinkLocalMulticast() || addr.IsMulticast() || !addr.IsGlobalUnicast() ||
-		(addr.Is4() && futureIPv4.Contains(addr))
+		(addr.Is4() && futureIPv4.Contains(addr)) || addr == alibabaMetadata || addr == awsIPv6Metadata
 }
 
 func privateTarget(addr netip.Addr) bool {
