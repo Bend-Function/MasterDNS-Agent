@@ -44,6 +44,8 @@ type Spool struct {
 	maxItems      int
 	maxBytes      int64
 	closed        bool
+	quarantineSeq uint64
+	remove        func(string) error
 }
 
 func Open(dir string, maxItems int, maxBytes int64) (*Spool, error) {
@@ -82,7 +84,10 @@ func Open(dir string, maxItems int, maxBytes int64) (*Spool, error) {
 			return nil, fmt.Errorf("restrict spool subdirectory: %w", err)
 		}
 	}
-	return &Spool{lock: directoryLock, resultsDir: resultsDir, quarantineDir: quarantineDir, maxItems: maxItems, maxBytes: maxBytes}, nil
+	return &Spool{
+		lock: directoryLock, resultsDir: resultsDir, quarantineDir: quarantineDir,
+		maxItems: maxItems, maxBytes: maxBytes, remove: os.Remove,
+	}, nil
 }
 
 func (s *Spool) Close() error {
@@ -91,10 +96,10 @@ func (s *Spool) Close() error {
 	if s.closed {
 		return nil
 	}
-	s.closed = true
 	if err := s.lock.Close(); err != nil {
 		return fmt.Errorf("unlock spool directory: %w", err)
 	}
+	s.closed = true
 	return nil
 }
 
@@ -121,7 +126,7 @@ func (s *Spool) Put(result protocol.Result) error {
 		if valid {
 			return nil
 		}
-		if err := s.quarantine(finalPath, filepath.Base(finalPath), "invalid_existing_result"); err != nil {
+		if err := s.quarantine(finalPath, "invalid_existing_result", true); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -206,7 +211,7 @@ func (s *Spool) Batch(limit int) ([]protocol.Result, error) {
 			if info.Size() > s.maxBytes {
 				reason = "oversized_file"
 			}
-			if err := s.quarantine(path, entry.Name(), reason); err != nil {
+			if err := s.quarantine(path, reason, false); err != nil {
 				return nil, err
 			}
 			continue
@@ -225,7 +230,7 @@ func (s *Spool) Batch(limit int) ([]protocol.Result, error) {
 			reason = "invalid_result"
 		}
 		if reason != "" {
-			if err := s.quarantine(path, entry.Name(), reason); err != nil {
+			if err := s.quarantine(path, reason, false); err != nil {
 				return nil, err
 			}
 			continue
@@ -275,7 +280,7 @@ func (s *Spool) Reject(taskID, reasonCode string) error {
 		}
 		return fmt.Errorf("inspect rejected result: %w", err)
 	}
-	return s.quarantine(path, filepath.Base(path), reasonCode)
+	return s.quarantine(path, reasonCode, true)
 }
 
 func (s *Spool) resultPath(taskID string) string {
@@ -308,41 +313,30 @@ type quarantineMetadata struct {
 	QuarantinedAt time.Time `json:"quarantinedAt"`
 }
 
-func (s *Spool) quarantine(sourcePath, sourceName, reasonCode string) error {
+func (s *Spool) quarantine(sourcePath, reasonCode string, sourceFailureFatal bool) error {
 	metadata, err := json.Marshal(quarantineMetadata{ReasonCode: reasonCode, QuarantinedAt: time.Now().UTC()})
 	if err != nil {
 		return fmt.Errorf("encode quarantine reason: %w", err)
 	}
-	info, err := os.Lstat(sourcePath)
-	if err != nil {
-		return fmt.Errorf("inspect quarantined result %q: %w", sourceName, err)
-	}
-	retainPayload := info.Mode().IsRegular() && info.Size()+int64(len(metadata)) <= s.maxBytes
-	neededItems := 1
-	neededBytes := int64(len(metadata))
-	if retainPayload {
-		neededItems++
-		neededBytes += info.Size()
-	}
-	if err := s.makeQuarantineSpace(neededItems, neededBytes); err != nil {
+	if err := s.makeQuarantineSpace(1, int64(len(metadata))); err != nil {
 		return err
 	}
-	eventID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), strings.TrimSuffix(sourceName, resultFileSuffix))
-	if retainPayload {
-		if err := os.Rename(sourcePath, filepath.Join(s.quarantineDir, eventID+".bad")); err != nil {
-			return fmt.Errorf("quarantine result %q: %w", sourceName, err)
-		}
-	} else if err := os.Remove(sourcePath); err != nil {
-		return fmt.Errorf("remove oversized quarantined result %q: %w", sourceName, err)
-	}
+	s.quarantineSeq++
+	eventID := fmt.Sprintf("q-%016x-%016x", uint64(time.Now().UnixNano()), s.quarantineSeq)
 	if err := writeAtomic(s.quarantineDir, eventID+quarantineMetadataSuffix, metadata); err != nil {
-		return fmt.Errorf("record quarantine reason for %q: %w", sourceName, err)
-	}
-	if err := syncDir(s.resultsDir); err != nil {
-		return fmt.Errorf("sync result quarantine: %w", err)
+		return fmt.Errorf("record quarantine reason: %w", err)
 	}
 	if err := syncDir(s.quarantineDir); err != nil {
 		return fmt.Errorf("sync quarantine directory: %w", err)
+	}
+	if err := s.remove(sourcePath); err != nil {
+		if sourceFailureFatal {
+			return fmt.Errorf("remove quarantined result: %w", err)
+		}
+		return nil
+	}
+	if err := syncDir(s.resultsDir); err != nil {
+		return fmt.Errorf("sync result quarantine: %w", err)
 	}
 	return nil
 }

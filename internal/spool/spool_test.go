@@ -225,8 +225,8 @@ func TestMalformedFileIsQuarantinedWithoutPoisoningBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(quarantined) != 2 {
-		t.Fatalf("quarantine entries = %d, want payload and reason metadata", len(quarantined))
+	if len(quarantined) != 1 {
+		t.Fatalf("quarantine entries = %d, want reason metadata", len(quarantined))
 	}
 	for _, entry := range quarantined {
 		if !strings.HasSuffix(entry.Name(), quarantineMetadataSuffix) {
@@ -246,6 +246,84 @@ func TestMalformedFileIsQuarantinedWithoutPoisoningBatch(t *testing.T) {
 		if strings.Contains(string(payload), "secret-corrupt-marker") {
 			t.Fatal("quarantine metadata contains corrupt payload")
 		}
+	}
+}
+
+func TestNearNameLimitMalformedFileDoesNotPoisonValidBatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, 10, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badName := strings.Repeat("0", 250) + resultFileSuffix
+	if err := os.WriteFile(filepath.Join(dir, resultsDirName, badName), []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := testResult("11111111-1111-4111-8111-111111111111")
+	if err := s.Put(valid); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := s.Batch(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 1 || batch[0].TaskID != valid.TaskID {
+		t.Fatalf("batch = %#v", batch)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, quarantineDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || len(entries[0].Name()) > 64 {
+		t.Fatalf("quarantine entries = %v", entryNames(entries))
+	}
+}
+
+func TestDeleteFailurePreservesReasonAndDoesNotPoisonValidBatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, 10, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badName := "00000000-0000-0000-0000-000000000000" + resultFileSuffix
+	badPath := filepath.Join(dir, resultsDirName, badName)
+	if err := os.WriteFile(badPath, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := testResult("11111111-1111-4111-8111-111111111111")
+	if err := s.Put(valid); err != nil {
+		t.Fatal(err)
+	}
+	removeCalls := 0
+	s.remove = func(path string) error {
+		if path == badPath && removeCalls == 0 {
+			removeCalls++
+			return errors.New("injected delete failure")
+		}
+		return os.Remove(path)
+	}
+	batch, err := s.Batch(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 1 || batch[0].TaskID != valid.TaskID {
+		t.Fatalf("batch after quarantine delete failure = %#v", batch)
+	}
+	if _, err := os.Stat(badPath); err != nil {
+		t.Fatalf("malformed source not preserved: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, quarantineDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("reason metadata entries = %v", entryNames(entries))
+	}
+	if _, err := s.Batch(100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(badPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed source remains after retry: %v", err)
 	}
 }
 
