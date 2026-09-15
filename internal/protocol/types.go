@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 )
@@ -55,11 +56,22 @@ type CheckConfig struct {
 }
 
 func (c *CheckConfig) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
 	var kind struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &kind); err != nil {
 		return err
+	}
+	if kind.Type == "tcp" {
+		for name := range fields {
+			if name != "type" && name != "port" && name != "timeoutMs" {
+				return fmt.Errorf("field %q is not allowed for TCP checks", name)
+			}
+		}
 	}
 
 	type plainCheckConfig CheckConfig

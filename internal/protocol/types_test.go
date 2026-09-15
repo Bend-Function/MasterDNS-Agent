@@ -26,6 +26,37 @@ func TestTaskJSONRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestDecodeTaskRejectsHTTPOnlyFieldsOnTCPCheck(t *testing.T) {
+	tests := map[string]string{
+		"headers":               `"headers":{"X-Probe":"yes"}`,
+		"body pattern":          `"bodyPattern":"ready"`,
+		"redirects true":        `"followRedirects":true`,
+		"redirects false":       `"followRedirects":false`,
+		"explicit empty method": `"method":""`,
+	}
+	for name, field := range tests {
+		t.Run(name, func(t *testing.T) {
+			data := []byte(`{
+  "protocol":"probe-agent/v1",
+  "taskId":"11111111-1111-4111-8111-111111111111",
+  "roundId":"22222222-2222-4222-8222-222222222222",
+  "probeId":"33333333-3333-4333-8333-333333333333",
+  "leaseId":"44444444-4444-4444-8444-444444444444",
+  "addressVersion":1,
+  "configVersion":1,
+  "address":"192.0.2.10",
+  "family":4,
+  "config":{"type":"tcp","port":443,` + field + `},
+  "deadline":"2026-09-15T12:00:00Z"
+}`)
+			var task Task
+			if err := DecodeTask(data, &task); err == nil {
+				t.Fatalf("accepted HTTP-only TCP field %s", field)
+			}
+		})
+	}
+}
+
 func TestRejectWrongFamily(t *testing.T) {
 	task := readTaskFixture(t)
 	task.Address, task.Family = "192.0.2.10", 6
