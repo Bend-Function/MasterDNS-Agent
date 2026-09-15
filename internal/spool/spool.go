@@ -79,15 +79,82 @@ func Open(dir string, maxItems int, maxBytes int64) (*Spool, error) {
 			_ = directoryLock.Close()
 			return nil, fmt.Errorf("create spool subdirectory: %w", err)
 		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() {
+			_ = directoryLock.Close()
+			if err != nil {
+				return nil, fmt.Errorf("inspect spool subdirectory: %w", err)
+			}
+			return nil, fmt.Errorf("spool subdirectory %q is not a directory", path)
+		}
 		if err := os.Chmod(path, 0o700); err != nil {
 			_ = directoryLock.Close()
 			return nil, fmt.Errorf("restrict spool subdirectory: %w", err)
+		}
+	}
+	// Only the exclusive owner may discard temporary writes left by a prior
+	// process. Committed results and reason metadata are never recovery debris.
+	for _, temporary := range []struct{ dir, prefix string }{
+		{resultsDir, ".result-"}, {quarantineDir, ".quarantine-"},
+	} {
+		if err := cleanupTemporaryFiles(temporary.dir, temporary.prefix); err != nil {
+			_ = directoryLock.Close()
+			return nil, err
 		}
 	}
 	return &Spool{
 		lock: directoryLock, resultsDir: resultsDir, quarantineDir: quarantineDir,
 		maxItems: maxItems, maxBytes: maxBytes, remove: os.Remove,
 	}, nil
+}
+
+func cleanupTemporaryFiles(dir, prefix string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read abandoned spool writes: %w", err)
+	}
+	removed := false
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		// os.CreateTemp uses an unsigned 32-bit decimal suffix. Restrict recovery
+		// to that internal namespace rather than deleting arbitrary .tmp files.
+		suffix := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".tmp")
+		if len(suffix) == 0 || len(suffix) > 10 {
+			continue
+		}
+		digits := true
+		for _, char := range suffix {
+			if char < '0' || char > '9' {
+				digits = false
+				break
+			}
+		}
+		if !digits {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect abandoned spool write %q: %w", name, err)
+		}
+		// DirEntry.Info does not follow symlinks. Never recurse into directories
+		// or treat links and other special files as our temporary regular files.
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return fmt.Errorf("remove abandoned spool write %q: %w", name, err)
+		}
+		removed = true
+	}
+	if removed {
+		if err := syncDir(dir); err != nil {
+			return fmt.Errorf("sync abandoned spool write cleanup: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Spool) Close() error {

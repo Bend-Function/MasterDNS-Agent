@@ -626,3 +626,89 @@ func TestCapacityAndContainsReserveCompletedResults(t *testing.T) {
 		t.Fatalf("closed capacity = %v", err)
 	}
 }
+
+func TestReopenCleansOnlyAbandonedInternalTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, 2, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	want := testResult("11111111-1111-4111-8111-111111111111")
+	if err := s.Put(want); err != nil {
+		t.Fatal(err)
+	}
+	rejected := testResult("22222222-2222-4222-8222-222222222222")
+	if err := s.Put(rejected); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reject(rejected.TaskID, "lease_rejected"); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadDir(s.quarantineDir)
+	if err != nil || len(metadata) != 1 {
+		t.Fatalf("metadata=%v err=%v", metadata, err)
+	}
+	reasonPath := filepath.Join(s.quarantineDir, metadata[0].Name())
+	reason, err := os.ReadFile(reasonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphans := []string{filepath.Join(s.resultsDir, ".result-123456.tmp"), filepath.Join(s.quarantineDir, ".quarantine-987654.tmp")}
+	for _, path := range orphans {
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", 8192)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := []string{filepath.Join(s.resultsDir, ".unrelated.tmp"), filepath.Join(s.resultsDir, ".result-not-internal.tmp"), filepath.Join(s.resultsDir, ".quarantine-123.tmp"), filepath.Join(s.quarantineDir, ".result-123.tmp")}
+	for _, path := range unrelated {
+		if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A competing opener must not remove the active owner's temporary files.
+	if other, err := Open(dir, 2, 4096); !errors.Is(err, ErrInUse) {
+		if other != nil {
+			other.Close()
+		}
+		t.Fatalf("competing Open=%v", err)
+	}
+	for _, path := range orphans {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir, 2, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for _, path := range orphans {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("orphan remains: %s: %v", path, err)
+		}
+	}
+	for _, path := range unrelated {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != "keep" {
+			t.Errorf("unrelated file changed: %s: %v", path, err)
+		}
+	}
+	gotReason, err := os.ReadFile(reasonPath)
+	if err != nil || string(gotReason) != string(reason) {
+		t.Fatalf("committed reason changed: %v", err)
+	}
+	got, err := reopened.Batch(100)
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("batch=%#v err=%v", got, err)
+	}
+	if err := reopened.Put(testResult("33333333-3333-4333-8333-333333333333")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Put(testResult("44444444-4444-4444-8444-444444444444")); !errors.Is(err, ErrFull) {
+		t.Fatalf("capacity limit lost: %v", err)
+	}
+}
